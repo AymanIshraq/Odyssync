@@ -302,6 +302,8 @@ function createHandoff(ctx) {
   function finishOutgoing(t, result) {
     clearTimeout(t.timer);
     waiting.delete(t.id);
+    // A direct send: our tab stays open, so no window command and no overlay event; just answer the button.
+    if (t.direct) return t.done(result === 'PLACED' ? { ok: true } : { ok: false, error: result === 'REJECTED' ? t.name + ' declined the tab' : 'The tab could not be opened on ' + t.name + '\'s laptop' });
     if (!t.file && !(t.doc && (t.doc.editor || t.doc.keepSource))) bridge.send({ type: result === 'PLACED' ? 'CLOSE_WINDOW' : 'SHOW_WINDOW', hwnd: t.hwnd });
     if ((t.file || t.doc) && result === 'FAILED') notify('error', 'File was not delivered');
     show(result, 'sender', t.edge, t.id);
@@ -314,6 +316,55 @@ function createHandoff(ctx) {
     if (msg.type === 'TRANSFER_ACCEPTED') finishOutgoing(t, 'PLACED'); // rule 5
     else if (msg.type === 'TRANSFER_REJECTED') finishOutgoing(t, 'REJECTED'); // rule 6
     else finishOutgoing(t, 'FAILED'); // rule 6
+  }
+
+  // ================= SENDER: the "Send tab" button (a copy: our tab stays open) =================
+
+  let direct = null; // our one direct send in progress: { target, name, done, lookupTimer }
+
+  // Ask our sidecar for the last-used browser tab, then send its URL to this member.
+  // Always resolves: { ok: true } once it opened there, else { ok: false, error }.
+  function sendDirect(target) {
+    return new Promise((resolve) => {
+      if (!isMember(target)) return resolve({ ok: false, error: 'That laptop is not in the room' });
+      if (!bridge.isConnected()) return resolve({ ok: false, error: 'Odyssync\'s Windows helper is not running' });
+      if (modeOf(target) === 'focus') return resolve({ ok: false, error: nameOf(target) + ' is in Focus mode' });
+      if (direct) return resolve({ ok: false, error: 'Still sending the last tab' });
+      const d = { target, name: nameOf(target), lookupTimer: null };
+      d.done = (answer) => { clearTimeout(d.lookupTimer); if (direct === d) direct = null; resolve(answer); };
+      direct = d; // before asking: a quick sidecar can answer at once
+      d.lookupTimer = setTimeout(() => d.done({ ok: false, error: 'Could not read your browser tab' }), 2500);
+      if (!bridge.send({ type: 'GET_ACTIVE_TAB' })) d.done({ ok: false, error: 'Odyssync\'s Windows helper is not running' });
+    });
+  }
+
+  // Our sidecar's ACTIVE_TAB answer: commit the tab to the waiting direct send.
+  function onActiveTab(msg) {
+    const d = direct;
+    if (!d || d.lookupTimer === null) return; // nobody asked, or already sent: ignore
+    clearTimeout(d.lookupTimer);
+    d.lookupTimer = null;
+    if (msg.error !== undefined) return d.done({ ok: false, error: typeof msg.error === 'string' && msg.error ? msg.error : 'Could not read your browser tab' });
+    if (typeof msg.url !== 'string' || !/^https?:\/\//i.test(msg.url)) return d.done({ ok: false, error: 'Only web pages can be sent this way' });
+    if (!isMember(d.target)) return d.done({ ok: false, error: 'That laptop is not in the room' });
+    const receiverMode = modeOf(d.target);
+    if (receiverMode === 'focus') return d.done({ ok: false, error: d.name + ' is in Focus mode' });
+    // Our edge that faces this laptop, if it sits beside us; else none (it shows up on its RIGHT).
+    const mine = (getState().neighbors || {})[selfId()] || {};
+    const side = ['left', 'right', 'top', 'bottom'].find((e) => mine[e] === d.target);
+    const t = { id: crypto.randomUUID(), target: d.target, name: d.name, direct: true, done: d.done, timer: null };
+    // Register before sending: a quick peer can answer at once.
+    waiting.set(t.id, t);
+    t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), receiverMode === 'approval' ? times.replyApproval : times.reply);
+    const sent = transport.sendToPeer(t.target, {
+      type: 'TRANSFER_COMMIT', transferId: t.id, kind: 'tab', edge: side ? side.toUpperCase() : null, centerRatio: 0.5, width: 1280, height: 800,
+      url: msg.url, title: msg.title, browser: msg.browser, direct: true,
+    });
+    if (!sent && waiting.has(t.id)) {
+      clearTimeout(t.timer);
+      waiting.delete(t.id);
+      d.done({ ok: false, error: 'Could not reach that laptop' });
+    }
   }
 
   // ================= SENDER: a file dropped on our overlay =================
@@ -475,7 +526,8 @@ function createHandoff(ctx) {
 
   function onCommit(msg) {
     const hadGhost = incoming.has(msg.transferId);
-    const r = incomingFor(msg.transferId, msg.fromId, msg.edge);
+    // A direct send from a laptop not beside us has no edge: it comes in on our RIGHT (sender "LEFT").
+    const r = incomingFor(msg.transferId, msg.fromId, msg.edge || (msg.direct ? 'LEFT' : null));
     if (r.commit) return; // the same commit twice: already handled
     r.commit = msg;
     const myMode = modeOf(selfId());
@@ -656,6 +708,7 @@ function createHandoff(ctx) {
       case 'LOCAL_DRAG_MOVE': return onDragMove(msg);
       case 'LOCAL_DRAG_END': return onDragEnd(msg);
       case 'LOCAL_FILE_DRAG': return onFileDrag(msg);
+      case 'ACTIVE_TAB': return onActiveTab(msg);
       case 'WINDOW_PLACED': {
         const r = incoming.get(msg.transferId);
         if (r && r.stage === 'opening') endIncoming(r, 'PLACED', { type: 'TRANSFER_ACCEPTED' });
@@ -692,7 +745,7 @@ function createHandoff(ctx) {
     }
   }
 
-  return { onPeerMessage, roomChanged };
+  return { onPeerMessage, roomChanged, sendDirect };
 }
 
 module.exports = { createHandoff };

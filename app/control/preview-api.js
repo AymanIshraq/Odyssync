@@ -30,6 +30,7 @@
     async joinRoom({roomNumber,pin,displayName,directIp}){if(pin!=='1234')return {ok:false,reason:'bad_pin'};if(!directIp&&roomNumber!=='482916')return {ok:false,reason:'no_room'};enter(displayName,false);return {ok:true};},
     async leaveRoom(){state={self,members:[],screens:[]};emit();},
     async setLayout(screens){if(!state.isHost)throw Error('Only the host can arrange screens.');state.screens=structuredClone(screens);emit();},
+    async sendDirect(deviceId){await new Promise(r=>setTimeout(r,600));return {ok:true};},
     async setMode(mode){if(!['focus','collaborative','approval'].includes(mode))throw Error('Unknown mode');state.modes={...state.modes,[self.deviceId]:mode};emit();},
     // Optional UI integration extension; the production bridge has not been built.
     management:{

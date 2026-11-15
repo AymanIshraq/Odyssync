@@ -325,8 +325,10 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
     PATHS.forEach((path) => transport.sendToServer(path, { type: 'KICK_MEMBER', targetDeviceId }));
   }
 
+  // The "Send tab" button: our last-used browser tab opens on that laptop (ours stays open).
   function sendDirect(targetDeviceId) {
-    console.log('[room] sendDirect to ' + targetDeviceId + ' (not built yet)');
+    if (!room) return Promise.resolve({ ok: false, error: 'You are not in a room' });
+    return handoff.sendDirect(targetDeviceId);
   }
 
   return {
