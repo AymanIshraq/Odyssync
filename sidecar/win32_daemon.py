@@ -1,4 +1,4 @@
-"""Windows sidecar: browser drags, previews, and native handoff commands."""
+"""Windows sidecar: browser and document drags, previews, and native handoff commands."""
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -13,11 +13,12 @@ import threading
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from sidecar.documents import read_dragged_window
 from sidecar.drag import DragTracker, FileDragTracker
 from sidecar.handoff import WindowController
 from sidecar.lookups import lookup_reply
 from sidecar.preview import capture_preview
-from sidecar.windows import WindowsDesktop, enable_dpi_awareness, read_browser_tab, warm_browser_worker
+from sidecar.windows import WindowsDesktop, enable_dpi_awareness, warm_browser_worker
 
 log = logging.getLogger(__name__)
 BRIDGE_URL = "ws://127.0.0.1:8089"
@@ -37,7 +38,7 @@ class BrowserReader:
     def submit(self, hwnd):
         if self.pending is not None and not self.pending.done():
             return None
-        self.pending = self.executor.submit(read_browser_tab, hwnd)
+        self.pending = self.executor.submit(read_dragged_window, hwnd)
         return asyncio.wrap_future(self.pending)
 
     def close(self):
@@ -134,13 +135,15 @@ async def receive_commands(socket, active, controller=None, outbox=None, executo
                             lambda future: None if future.cancelled() else future.exception())
                 if outbox is not None:
                     outbox.put(result)
-            elif message.get("type") in ("HIDE_WINDOW", "SHOW_WINDOW", "CLOSE_WINDOW", "OPEN_URL", "BOUNCE_WINDOW"):
+            elif message.get("type") in ("HIDE_WINDOW", "SHOW_WINDOW", "CLOSE_WINDOW", "OPEN_URL", "OPEN_FILE",
+                                         "BOUNCE_WINDOW"):
                 if controller is None or outbox is None:
                     raise ValueError("Window command handler is unavailable")
                 loop = asyncio.get_running_loop()
                 try:
-                    if message["type"] == "OPEN_URL":
-                        result = await loop.run_in_executor(executor, controller.open_url, message, stopped)
+                    if message["type"] in ("OPEN_URL", "OPEN_FILE"):
+                        opener = controller.open_url if message["type"] == "OPEN_URL" else controller.open_file
+                        result = await loop.run_in_executor(executor, opener, message, stopped)
                         outbox.put(result)
                     elif message["type"] == "BOUNCE_WINDOW":
                         await loop.run_in_executor(executor, controller.bounce,
@@ -153,7 +156,7 @@ async def receive_commands(socket, active, controller=None, outbox=None, executo
                     raise
                 except Exception as error:
                     log.warning("Window command %s failed: %s", message["type"], error)
-                    if message["type"] == "OPEN_URL":
+                    if message["type"] in ("OPEN_URL", "OPEN_FILE"):
                         outbox.put({"type": "OPEN_FAILED", "transferId": message.get("transferId"),
                                     "error": str(error)})
             else:
@@ -162,7 +165,7 @@ async def receive_commands(socket, active, controller=None, outbox=None, executo
             log.warning("Ignoring malformed bridge command", exc_info=True)
 
 
-async def poll_desktop(desktop, active, outbox, reader, previews=None):
+async def poll_desktop(desktop, active, outbox, reader, previews=None, documents=None):
     tracker = DragTracker()
     files = FileDragTracker()
     pending = None
@@ -213,9 +216,13 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None):
                     try:
                         start = tracker.qualify(pending_generation, pending.result())
                         if start:
+                            if start.get("kind") == "document" and documents is not None:
+                                # Lets Electron's window commands act on this handle.
+                                documents.add(start["hwnd"])
                             outbox.put(start)
-                    except Exception:
-                        log.warning("Browser qualification failed; ignoring drag", exc_info=True)
+                    except Exception as error:
+                        # Expected for most ordinary window moves; no traceback noise.
+                        log.info("Window qualification failed; ignoring drag: %s", error)
                     pending = None
                 if request and pending is None:
                     pending_generation, hwnd = request
@@ -253,7 +260,8 @@ async def run_session(socket, desktop, reader, controller=None, previews=None, l
     await socket.send(json.dumps({"type": "SIDECAR_READY", **desktop.screen_info()}))
     tasks = [asyncio.create_task(receive_commands(socket, active, controller, outbox, commands, stopped,
                                                   desktop, lookups)),
-             asyncio.create_task(poll_desktop(desktop, active, outbox, reader, previews)),
+             asyncio.create_task(poll_desktop(desktop, active, outbox, reader, previews,
+                                              getattr(controller, "documents", None))),
              asyncio.create_task(outbox.send(socket))]
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

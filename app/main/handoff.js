@@ -1,6 +1,9 @@
 // Handoff: the tab-handoff state machine (plan/contract.md, "Sender rules" and
 // "Receiver rules"), and the file transfer (a file dropped on the overlay's drop
-// strip goes to the neighbour's Downloads\Odyssync folder). As SENDER it turns
+// strip goes to the neighbour's Downloads\Odyssync folder). A dragged DOCUMENT
+// window (a local file open in the browser, Notepad, Word...) travels as a file
+// that the neighbour saves and then opens where the picture stopped (a code editor's
+// window stays here and only its file goes, to open in the same editor). As SENDER it turns
 // this laptop's sidecar drag reports into
 // network messages and overlay events; as RECEIVER it turns other laptops'
 // messages into overlay events and sidecar commands, and answers the sender.
@@ -11,6 +14,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const url = require('url');
 
 const MOVE_MS = 16; // EDGE_DRAG_MOVE at most once per 16 ms
 const MAX_BUFFERED = 64 * 1024; // bytes waiting on the socket before we hold moves back
@@ -20,12 +24,19 @@ const DEFAULT_TIMEOUTS = {
   approval: 30000, // receiver: no Accept/Reject in 30 s -> rejected
   ghost: 500, // receiver: wait this long for the overlay's ghostSettled (its animation takes about 0.26 s)
   open: 4300, // receiver: wait for the sidecar's answer (it tries for 4 s); ghost + this stays under the sender's 5 s
-  fileReply: 60000, // sender: no answer to a file in 60 s -> failed
-  fileReplyApproval: 90000, // the same, when the receiver is in approval mode
+  fileReply: 70000, // sender: no answer to a file or document in 70 s -> failed (receiver: 60 s for the bytes + ghost + open)
+  fileReplyApproval: 100000, // the same, when the receiver is in approval mode (+30 s for Accept)
   filePayload: 60000, // receiver: the file's bytes must arrive within 60 s of its commit
 };
 const OPPOSITE = { LEFT: 'RIGHT', RIGHT: 'LEFT', TOP: 'BOTTOM', BOTTOM: 'TOP' };
 const MAX_FILE = 50 * 1024 * 1024; // FILE_PAYLOAD is at most 50 MB
+// Files we are willing to open by themselves after receiving them. Anything else
+// (programs, scripts, macro documents, web pages) is only saved and shown in its folder.
+const OPENABLE = new Set(['.pdf', '.txt', '.md', '.log', '.csv', '.json', '.xml', '.rtf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']);
+// Code editors. Dragging one of their windows sends the file in its active tab, the window
+// itself stays here, and the neighbour opens the file in the same editor. An editor only
+// shows a file, it never runs it, so any type of file may be opened in one.
+const EDITORS = new Set(['code.exe', 'cursor.exe']);
 const DROP_END_MS = 300; // the drop reaches the overlay about when the button goes up: keep the strip this long
 const DROP_START_MS = 200; // a plain click near the edge looks like a drag for a moment: wait this long before showing the strip
 
@@ -62,7 +73,7 @@ function writeNew(dir, name, bytes) {
   }
 }
 
-// ctx = { transport, getState, bridge?, overlay?, timeouts?, notify?, revealFile?, downloadsDir? }
+// ctx = { transport, getState, bridge?, overlay?, timeouts?, notify?, revealFile?, openFile?, downloadsDir? }
 function createHandoff(ctx) {
   const { transport, getState } = ctx;
   const bridge = ctx.bridge || { send: () => false, onMessage: () => {}, isConnected: () => false };
@@ -70,10 +81,11 @@ function createHandoff(ctx) {
   const times = { ...DEFAULT_TIMEOUTS, ...ctx.timeouts };
   const notify = ctx.notify || (() => {}); // a notice in the Control Center: notify("error", text)
   const revealFile = ctx.revealFile || (() => {}); // open Explorer with this file selected
+  const openFile = ctx.openFile || (() => 'cannot open files here'); // open a file in its program; returns '' or an error text (maybe as a Promise)
   const downloadsDir = ctx.downloadsDir || path.join(os.homedir(), 'Downloads', 'Odyssync');
 
   let sidecarDpi = null; // dpiScale from SIDECAR_READY, once it has arrived
-  let drag = null; // our one drag in progress: { hwnd, browser, url, title, preview, transfer }
+  let drag = null; // our one drag in progress: { hwnd, browser, url, title, doc, preview, transfer }
   const waiting = new Map(); // transferId -> our committed transfer, waiting for an answer
   const incoming = new Map(); // transferId -> a transfer coming to us
 
@@ -147,8 +159,20 @@ function createHandoff(ctx) {
   function onDragStart(msg) {
     if (drag && drag.transfer) cancelOutgoing(drag.transfer); // the old drag never ended
     drag = null;
-    if (msg.tabCount !== 1 || !msg.url) return; // several tabs, or no URL: ignore the whole drag (E4.9)
-    drag = { hwnd: msg.hwnd, browser: msg.browser, url: msg.url, title: msg.title, preview: null, transfer: null };
+    // doc: the dragged window shows a local file, so the file itself travels: { path, editor }.
+    // editor: "code.exe" or "cursor.exe" when the window is a code editor, else null.
+    let doc = null;
+    if (msg.kind === 'document') {
+      if (typeof msg.path !== 'string' || !msg.path) return; // a document window with no saved file: ignore
+      doc = { path: msg.path, editor: EDITORS.has(msg.app) ? msg.app : null };
+    } else {
+      if (msg.tabCount !== 1 || !msg.url) return; // several tabs, or no URL: ignore the whole drag (E4.9)
+      if (/^file:/i.test(msg.url)) {
+        // A local file open in the browser (a PDF): the URL is useless on the other laptop, send the file.
+        try { doc = { path: url.fileURLToPath(msg.url, { windows: true }) }; } catch { return; } // a broken file URL: ignore
+      }
+    }
+    drag = { hwnd: msg.hwnd, browser: msg.browser, url: msg.url, title: msg.title, doc, preview: null, transfer: null };
   }
 
   function onPreview(header, bytes) {
@@ -167,8 +191,8 @@ function createHandoff(ctx) {
     if (!target) return; // no edge, or no neighbour on it: nothing at all (E4.8)
     if (!t) {
       // Rule 1: entering an edge with a neighbour starts a new transfer.
-      const { hwnd, url, title, browser } = drag;
-      t = { id: crypto.randomUUID(), target, edge, hwnd, url, title, browser, lastMove: null, lastSentAt: 0, moveTimer: null, timer: null };
+      const { hwnd, url: tabUrl, title, browser, doc } = drag;
+      t = { id: crypto.randomUUID(), target, edge, hwnd, url: tabUrl, title, browser, doc, lastMove: null, lastSentAt: 0, moveTimer: null, timer: null };
       drag.transfer = t;
       if (drag.preview) sendPreview(t, drag.preview);
     }
@@ -199,6 +223,7 @@ function createHandoff(ctx) {
       show('BOUNCE', 'sender', t.edge, t.id);
       return;
     }
+    if (t.doc) return commitDocument(t, receiverMode);
     // Rule 4: hide (not close) our window and ask the receiver to open the tab.
     const { centerRatio, width, height } = t.lastMove;
     bridge.send({ type: 'HIDE_WINDOW', hwnd: t.hwnd });
@@ -216,16 +241,52 @@ function createHandoff(ctx) {
     t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), ms);
   }
 
+  // Rule 4 for a document: check and read the file BEFORE hiding the window,
+  // then hide it and send the file (TRANSFER_COMMIT + FILE_PAYLOAD) with open: true.
+  // A code editor window is not hidden: it slides back (it usually holds a whole
+  // project) and only the file goes, with the editor's name.
+  function commitDocument(t, receiverMode) {
+    let stat;
+    try { stat = fs.statSync(t.doc.path); } catch { cancelOutgoing(t); return notify('error', 'Could not read that file'); }
+    if (!stat.isFile()) { cancelOutgoing(t); return notify('error', 'Folders cannot be sent. Zip the folder first.'); }
+    if (stat.size > MAX_FILE) { cancelOutgoing(t); return notify('error', 'File is too large (max 50 MB)'); }
+    let bytes;
+    try { bytes = fs.readFileSync(t.doc.path); } catch { cancelOutgoing(t); return notify('error', 'Could not read that file'); }
+    if (bytes.length > MAX_FILE) { cancelOutgoing(t); return notify('error', 'File is too large (max 50 MB)'); } // it grew meanwhile
+    const filename = path.win32.basename(t.doc.path); // a Windows path (also splits at "/")
+    const size = bytes.length;
+    const { centerRatio, width, height } = t.lastMove;
+    const editor = t.doc.editor;
+    if (editor) bridge.send({ type: 'BOUNCE_WINDOW', hwnd: t.hwnd, edge: t.edge });
+    else bridge.send({ type: 'HIDE_WINDOW', hwnd: t.hwnd });
+    const sent = transport.sendToPeer(t.target, {
+      type: 'TRANSFER_COMMIT', transferId: t.id, kind: 'file', open: true, ...(t.browser ? { browser: t.browser } : {}), title: t.title,
+      edge: t.edge, centerRatio, width, height, filename, size, direct: false, ...(editor ? { app: editor } : {}),
+    });
+    if (!sent) {
+      // It never left: bring the window back now instead of after the long wait (an editor's never went away).
+      if (!editor) bridge.send({ type: 'SHOW_WINDOW', hwnd: t.hwnd });
+      cancelOutgoing(t);
+      return notify('error', 'Could not reach that laptop');
+    }
+    transport.sendBinaryToPeer(t.target, { type: 'FILE_PAYLOAD', transferId: t.id, filename, mimeType: 'application/octet-stream', size }, bytes);
+    show('COMMIT', 'sender', t.edge, t.id, {
+      kind: 'tab', title: filename, url: 'file:///' + encodeURIComponent(filename), filename, size, // 'tab' keeps the picture
+      fromName: myProfile().displayName, mode: modeOf(selfId()), direct: false,
+    });
+    waiting.set(t.id, t);
+    // The receiver may need up to a minute for the bytes: the long file timer, not the 5 s tab one.
+    const ms = receiverMode === 'approval' ? times.fileReplyApproval : times.fileReply;
+    t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), ms);
+  }
+
   // A waiting transfer is over: close our window (accepted) or bring it back.
-  // A file has no window: it only gets a notice when it did not arrive.
+  // A dropped file has no window, and an editor's window stayed. A file or document that did not arrive gets a notice.
   function finishOutgoing(t, result) {
     clearTimeout(t.timer);
     waiting.delete(t.id);
-    if (t.file) {
-      if (result === 'FAILED') notify('error', 'File was not delivered');
-    } else {
-      bridge.send({ type: result === 'PLACED' ? 'CLOSE_WINDOW' : 'SHOW_WINDOW', hwnd: t.hwnd });
-    }
+    if (!t.file && !(t.doc && t.doc.editor)) bridge.send({ type: result === 'PLACED' ? 'CLOSE_WINDOW' : 'SHOW_WINDOW', hwnd: t.hwnd });
+    if ((t.file || t.doc) && result === 'FAILED') notify('error', 'File was not delivered');
     show(result, 'sender', t.edge, t.id);
   }
 
@@ -367,17 +428,29 @@ function createHandoff(ctx) {
     r.timer = setTimeout(() => openTab(r), times.ghost);
   }
 
-  // Ask our sidecar to open the URL at the ghost's spot (physical pixels).
+  // Ask our sidecar to open the URL (or, for a saved document, the file) at the
+  // ghost's spot (physical pixels).
   function openTab(r) {
     clearTimeout(r.timer);
     const rect = clampRect(r.rect || computedRect(r));
-    const sent = bridge.send({
-      type: 'OPEN_URL', transferId: r.id, url: r.commit.url, browser: r.commit.browser,
-      x: toPx(rect.x), y: toPx(rect.y), width: toPx(rect.width), height: toPx(rect.height),
-    });
-    if (!sent) return endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'no sidecar' });
+    const box = { x: toPx(rect.x), y: toPx(rect.y), width: toPx(rect.width), height: toPx(rect.height) };
+    const c = r.commit;
+    let cmd;
+    if (!r.saved) cmd = { type: 'OPEN_URL', transferId: r.id, url: c.url, browser: c.browser, ...box }; // a tab
+    else if (r.editor) cmd = { type: 'OPEN_FILE', transferId: r.id, path: r.saved, ...box, app: r.editor }; // the same code editor
+    else if (c.browser) cmd = { type: 'OPEN_URL', transferId: r.id, url: url.pathToFileURL(r.saved).href, browser: c.browser, ...box }; // it was open in a browser
+    else cmd = { type: 'OPEN_FILE', transferId: r.id, path: r.saved, ...box }; // its own program (Notepad, Word...)
+    const sent = bridge.send(cmd);
+    if (!sent) return openFailed(r, 'no sidecar');
     r.stage = 'opening';
-    r.timer = setTimeout(() => endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'timeout' }), times.open);
+    r.timer = setTimeout(() => openFailed(r, 'timeout'), times.open);
+  }
+
+  // Our sidecar could not open it. A file for an editor is saved all the same
+  // (maybe that editor is not installed here): show it in its folder, it arrived.
+  function openFailed(r, error) {
+    if (r.editor) return delivered(r, r.saved);
+    endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error });
   }
 
   function onCommit(msg) {
@@ -423,8 +496,14 @@ function createHandoff(ctx) {
       forget(r);
       return reply(r, { type: 'TRANSFER_FAILED', error: 'invalid' });
     }
+    // A file from a code editor opens in that editor; any other app name is ignored.
+    r.editor = msg.open === true && EDITORS.has(msg.app) ? msg.app : null;
+    // A document to open keeps the sliding picture: for the overlay it looks like a tab.
+    const card = msg.open === true
+      ? { kind: 'tab', title: filename, url: 'file:///' + encodeURIComponent(filename) }
+      : { kind: 'file', title: null, url: null };
     show('COMMIT', 'receiver', r.edge, r.id, {
-      kind: 'file', title: null, url: null, filename, size,
+      ...card, filename, size,
       fromName: nameOf(msg.fromId), mode: myMode, direct: !!msg.direct,
     });
     r.payloadTimer = setTimeout(() => endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'timeout' }), times.filePayload);
@@ -444,7 +523,8 @@ function createHandoff(ctx) {
     if (r.stage === 'file') saveFile(r);
   }
 
-  // Save into Downloads\Odyssync under a new name, show it in Explorer, tell the sender.
+  // Save into Downloads\Odyssync under a new name, then show it in Explorer
+  // (a document: open it instead), tell the sender.
   function saveFile(r) {
     let full;
     try {
@@ -453,8 +533,31 @@ function createHandoff(ctx) {
     } catch {
       return endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'could not save' });
     }
+    // Only ordinary documents open by themselves; any file opens in an editor (our sidecar starts it).
+    const editorHere = r.editor && bridge.isConnected();
+    if (r.commit.open === true && (editorHere || OPENABLE.has(path.extname(full).toLowerCase()))) return openSaved(r, full);
+    delivered(r, full);
+  }
+
+  // The file is saved: show it in Explorer and tell the sender it arrived.
+  function delivered(r, full) {
     try { revealFile(full); } catch (err) { console.log('[handoff] could not show the file: ' + err.message); }
     endIncoming(r, 'PLACED', { type: 'TRANSFER_ACCEPTED' });
+  }
+
+  // Open a saved document: with our sidecar at the ghost's spot (like a tab),
+  // else (no sidecar, e.g. a Mac) with the app's openFile. The file stays saved either way.
+  function openSaved(r, full) {
+    r.saved = full;
+    if (bridge.isConnected()) return waitForGhost(r);
+    r.stage = 'opening-here';
+    const failed = (error) => { if (incoming.get(r.id) === r) endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error }); };
+    Promise.resolve()
+      .then(() => openFile(full))
+      .then((err) => {
+        if (typeof err === 'string' && err !== '') return failed(err);
+        if (incoming.get(r.id) === r) endIncoming(r, 'PLACED', { type: 'TRANSFER_ACCEPTED' });
+      }, (err) => failed(String((err && err.message) || err)));
   }
 
   // The Approval card's answer.
@@ -536,7 +639,7 @@ function createHandoff(ctx) {
       }
       case 'OPEN_FAILED': {
         const r = incoming.get(msg.transferId);
-        if (r && r.stage === 'opening') endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: msg.error });
+        if (r && r.stage === 'opening') openFailed(r, msg.error);
         return;
       }
       default:

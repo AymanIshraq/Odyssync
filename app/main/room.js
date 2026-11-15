@@ -56,7 +56,7 @@ function activeEdges(state) {
   return { left: has('left'), right: has('right'), top: has('top'), bottom: has('bottom') };
 }
 
-function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge, overlay, revealFile }) {
+function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge, overlay, revealFile, openFile }) {
   const deviceId = crypto.randomBytes(4).toString('hex');
   const profile = { ...startProfile };
   const transport = createTransport(deviceId); // one for the whole life, so mids never restart
@@ -68,7 +68,7 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
   let waiting = null; // one server answer we are waiting for
   const stateListeners = [];
   const noticeListeners = [];
-  const handoff = createHandoff({ transport, getState, bridge, overlay, revealFile, notify: (kind, text) => notify(kind, text) }); // tab and file handoff (handoff.js)
+  const handoff = createHandoff({ transport, getState, bridge, overlay, revealFile, openFile, notify: (kind, text) => notify(kind, text) }); // tab and file handoff (handoff.js)
   stateListeners.push(() => handoff.roomChanged()); // after every room change: did someone leave?
 
   // ---------- state out ----------

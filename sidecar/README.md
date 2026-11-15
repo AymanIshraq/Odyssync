@@ -106,6 +106,7 @@ sidecar cannot restore windows; orderly bridge teardown should precede restart.
 ## Code map
 
 - [drag.py](drag.py): pure geometry, URL normalization, and drag lifecycle.
+- [documents.py](documents.py): which saved file a dragged non-browser window shows.
 - [windows.py](windows.py): DPI, mouse/window polling, browser process identification,
   read-only UI Automation inspection. Web document subtrees are excluded.
 - [win32_daemon.py](win32_daemon.py): connection lifecycle, commands, polling, outbox.
@@ -118,6 +119,8 @@ sidecar cannot restore windows; orderly bridge teardown should precede restart.
   paths, placement, and disconnect recovery.
 - [Section 3 tests](tests/test_section3.py): bounce, file-edge transitions,
   foreground tracking, selected-file lookup, and voice command dispatch.
+- [Document tests](tests/test_documents.py): local file URLs, command-line splitting,
+  document choice, editor titles, Office names, `OPEN_FILE` window choice, and the handle allow-list.
 - [Handoff regression tests](tests/test_handoff_regressions.py): hidden-window
   identification, refused-close recovery, focus-loss cancellation, final
   geometry delivery under backpressure, and incomplete UIA inspection.
@@ -137,6 +140,63 @@ posts close to that newly detected test window. Do not open another browser
 window during this check, because identification uses handle differences.
 The test can also use `--browser chrome` or `--browser msedge`.
 Add `--section3` to verify tab lookup and four native bounce animations too.
+
+## Document drags and `OPEN_FILE` (not yet run on Windows)
+
+None of this has been run on Windows yet; only the pure rules are tested.
+
+Any ordinary window can now start a drag, not only browsers. Shell, Explorer,
+dialog and console windows are excluded. The qualification worker checks the
+window's process: Chrome, Edge and Brave use the browser tab read. A local
+file open in a browser now gives a `file:///C:/...` URL with spaces encoded.
+Word, Excel and PowerPoint are asked through COM which saved file belongs to
+that window. Any other program qualifies only if it was started with exactly
+one existing file on its command line, and its title shows that file's name.
+A document then sends `LOCAL_DRAG_START {hwnd, kind: "document", path, title, app}`.
+The other drag messages are unchanged.
+
+Window commands accept a document window only if this sidecar qualified it
+as a document drag, or hid it. `OPEN_FILE {transferId, path, x, y, width, height}`
+opens the file with its default program. It waits up to 4 seconds for a new
+window that names the file, and places it like `OPEN_URL`. A program that
+reuses an existing window instead (for example a new tab) is reported but not
+moved. A new window that never names the file is accepted after 1.5 seconds,
+if it is the only one. Replies are `WINDOW_PLACED` or `OPEN_FAILED`.
+
+Not supported (the drag is ignored): unsaved documents, and files opened
+with File > Open after the program started. Also files in a tab other than
+the first in tabbed or single-instance programs. Also Office files stored
+only online (OneDrive or SharePoint addresses). Office Protected View windows
+are probably not found either (not checked).
+Relative paths on a command line are ignored. Our own app is excluded only
+by the name `electron.exe`; a packaged build needs its name added in `documents.py`.
+
+### VS Code and Cursor (not yet run on Windows)
+
+VS Code shows only the file's short name in its title by default, and is
+started on a folder, so the rules above find nothing. Each user sets this
+once in VS Code or Cursor (Settings, open `settings.json`):
+
+```json
+"window.title": "${dirty}${activeEditorLong}${separator}${rootName}${separator}${profileName}${separator}${appName}"
+```
+
+The title then starts with the active file's full path, for example
+`C:\proj\src\main.py - proj - Visual Studio Code` (`● ` in front when unsaved).
+For `code.exe` and `cursor.exe` the sidecar reads the path from the title,
+never the command line, and sends `LOCAL_DRAG_START` with `app` set to that exe.
+The sender's editor window is not hidden or closed; it only bounces back.
+`OPEN_FILE` with `app: "code.exe"` or `"cursor.exe"` opens the file in a new
+window of that editor (`--new-window`); any other `app` fails (absent or
+`null` keeps the default program). If the editor is
+not installed the reply is `OPEN_FAILED` with `editor not installed`; Electron
+then falls back to saving the file and showing it in its folder.
+The editor is found in registry App Paths, then the usual install folders.
+
+Limits: only the saved version on disk is sent, not unsaved changes. One
+file, not the project. Untitled and remote (SSH, WSL, containers) files are
+skipped. Without the setting the drag does nothing. More editors that take the
+same setting are one line in `EDITOR_APPS` in `documents.py`.
 
 ## Section 3 integration
 
