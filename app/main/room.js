@@ -65,6 +65,7 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
   let server = null; // our embedded room server (host only)
   let stopping = Promise.resolve(); // finishes when the last embedded server is fully closed
   let pendingJoin = null; // { roomNumber, pin } while we wait for JOIN_ACCEPTED
+  let pendingCreate = null; // host metadata until the first server confirms creation
   let waiting = null; // one server answer we are waiting for
   const stateListeners = [];
   const noticeListeners = [];
@@ -170,6 +171,13 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
   // ---------- incoming messages ----------
 
   transport.onMessage((msg, payload, path) => {
+    // A member can join immediately after ROOM_CREATED, before createRoom's
+    // local-server setup finishes. Establish host state before the next frame.
+    if (msg.type === 'ROOM_CREATED' && !room && pendingCreate) {
+      room = makeRoom({ isHost: true, hostId: deviceId, ...pendingCreate });
+      room.screens = [{ deviceId, x: 0, y: 0, w: profile.screenWidth, h: profile.screenHeight }];
+      room.neighbors = computeNeighbors(room.screens);
+    }
     // First JOIN_ACCEPTED: set up the room right here, before the host's next message arrives.
     if (msg.type === 'JOIN_ACCEPTED' && !room && pendingJoin) {
       room = makeRoom({ isHost: false, hostId: msg.hostId, ...pendingJoin, localIps: msg.hostLocalIps || [] });
@@ -231,7 +239,11 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
     let roomNumber = digits(6);
     const pin = digits(4);
     const localIps = getLocalIps();
-    const createMsg = () => ({ type: 'CREATE_ROOM', roomNumber, pin, hostLocalIps: localIps, localPort, profile });
+    pendingCreate = { roomNumber, pin, localIps };
+    const createMsg = () => {
+      pendingCreate.roomNumber = roomNumber; // also follow relay number-collision retries
+      return { type: 'CREATE_ROOM', roomNumber, pin, hostLocalIps: localIps, localPort, profile };
+    };
 
     // 1. Register with the relay; a number that is taken gets a new one (5 tries).
     let relayOk = false;
@@ -261,6 +273,7 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
     if (!localOk) { transport.close('local'); stopServer(); }
 
     if (!relayOk && !localOk) {
+      pendingCreate = null;
       transport.close('cloud');
       notify('error', 'Could not start a room: no internet and the local port is busy');
       throw new Error('could not start a room');
@@ -268,9 +281,8 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
     if (!relayOk) notify('error', 'No internet: others can join by IP and PIN only');
     if (!localOk) notify('error', 'Local server could not start: others can join over the internet only');
 
-    room = makeRoom({ isHost: true, hostId: deviceId, roomNumber, pin, localIps });
-    room.screens = [{ deviceId, x: 0, y: 0, w: profile.screenWidth, h: profile.screenHeight }];
-    room.neighbors = computeNeighbors(room.screens);
+    // Keep members/layout received while the second server was starting.
+    pendingCreate = null;
     emit();
     return { roomNumber, pin, localIps };
   }
@@ -299,6 +311,7 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
   // Close everything and go back to "no room". Resolves once our embedded server is closed.
   function leaveRoom() {
     pendingJoin = null;
+    pendingCreate = null;
     PATHS.forEach(transport.close);
     const wasInRoom = !!room;
     room = null;

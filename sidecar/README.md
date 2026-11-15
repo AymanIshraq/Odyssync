@@ -61,8 +61,9 @@ the fields in `LOCAL_DRAG_END` are unchanged. A foreground-window change
 cancels the drag, including when focus changes and release occur between polls.
 Disconnects discard the session and old drags. No transfers are replayed.
 Browser inspection runs in one dedicated UIA worker; stale results never
-start a later drag. If that worker is still busy, new qualifications are
-skipped rather than queued. A hung COM call cannot be forcibly interrupted
+start a later drag. If that worker is still busy, only the current drag's
+request is retained and submitted when the worker becomes free; ended drags
+are discarded, and native reads never stack up. A hung COM call cannot be forcibly interrupted
 by Python; a persistently stuck worker requires a sidecar restart.
 UI Automation is warmed on that worker before monitoring begins, keeping
 library/COM startup outside the timed drag path.
@@ -101,7 +102,10 @@ Electron's receiver deadline has already passed.
 - `OPEN_URL`: finds the requested browser in registry App Paths, launches
   `--new-window`, or uses the default URL handler if that browser is absent.
   It waits up to 4 seconds for a new visible supported browser window, clamps
-  and positions it, then emits `WINDOW_PLACED`; failures emit `OPEN_FAILED`.
+  and positions it on the primary monitor, maximizes it, then emits
+  `WINDOW_PLACED`; failures emit `OPEN_FAILED`. This keeps the browser tabs
+  and address bar visible (it does not enter F11 mode). Sender restoration
+  and Focus bounce keep their original window sizes.
 - `BOUNCE_WINDOW`: moves the real browser window inward from the supplied
   sender edge, using a 180 physical-pixel inset where space permits and an
   approximately 300 ms ease-out animation. Its final rectangle is clamped
@@ -115,8 +119,8 @@ Multiple new matching windows are treated as ambiguous and are not placed.
 The handle-difference approach cannot prove ownership if the user independently
 opens exactly one matching browser window at the same instant; this remains
 an integration limitation of the planned approach. No failed open closes
-any window. Placement uses `SWP_NOACTIVATE`; browser launch itself may focus
-the new window.
+any window. Initial placement uses `SWP_NOACTIVATE`; browser launch and
+maximization may focus the new received window.
 
 Electron must send `CLOSE_WINDOW` only after `TRANSFER_ACCEPTED`, or
 `SHOW_WINDOW` on rejection/failure/timeout (5 seconds, 35 in Approval mode).

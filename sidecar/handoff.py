@@ -245,6 +245,9 @@ class WindowController:
             if candidates:
                 hwnd = next(iter(candidates))
                 self.place(hwnd, tuple(message[field] for field in ("x", "y", "width", "height")))
+                # First place on the receiver's primary monitor, then maximize.
+                # Source restore/bounce keep their original window dimensions.
+                self.gui.ShowWindow(hwnd, 3)  # SW_SHOWMAXIMIZED
                 return {"type": "WINDOW_PLACED", "transferId": message["transferId"], "hwnd": hwnd}
             stopped.wait(0.05)
         raise TimeoutError("No new browser window appeared within 4 seconds, or bridge disconnected")

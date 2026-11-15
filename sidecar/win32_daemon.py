@@ -196,6 +196,7 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None):
     files = FileDragTracker()
     pending = None
     pending_generation = None
+    requested = None
     preview_pending = None
     preview_generation = None
     cache_generation = None
@@ -236,8 +237,12 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None):
                             preview_pending = previews.submit(event["hwnd"])
                             preview_generation = tracker.generation
                     outbox.put(event)
-                # Never stack UIA reads behind a blocked browser. A stale read
-                # finishes in its worker but cannot qualify a later drag.
+                # Retain only the current drag's request while UIA is busy.
+                # Never stack native calls or reuse an earlier drag's result.
+                if request:
+                    requested = request
+                if requested and requested != (tracker.generation, tracker.hwnd):
+                    requested = None
                 if pending is not None and pending.done():
                     try:
                         start = tracker.qualify(pending_generation, pending.result())
@@ -246,9 +251,11 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None):
                     except Exception:
                         log.warning("Browser qualification failed; ignoring drag", exc_info=True)
                     pending = None
-                if request and pending is None:
-                    pending_generation, hwnd = request
+                if requested and pending is None:
+                    pending_generation, hwnd = requested
                     pending = reader.submit(hwnd)
+                    if pending is not None:
+                        requested = None
             except asyncio.QueueFull:
                 raise RuntimeError("Bridge stalled; resetting drag session") from None
             except Exception:
@@ -257,6 +264,7 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None):
                     outbox.put({"type": "LOCAL_DRAG_END", "hwnd": tracker.hwnd,
                                 "edge": None, "cursorAtEdge": False, "velocity": 0.0})
                 tracker.reset()
+                requested = None
                 if files.edge is not None:
                     outbox.put({"type": "LOCAL_FILE_DRAG", "active": False, "edge": files.edge})
                     files.edge = None
