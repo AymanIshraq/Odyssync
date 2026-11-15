@@ -1,11 +1,16 @@
 // Handoff: the tab-handoff state machine (plan/contract.md, "Sender rules" and
-// "Receiver rules"). As SENDER it turns this laptop's sidecar drag reports into
+// "Receiver rules"), and the file transfer (a file dropped on the overlay's drop
+// strip goes to the neighbour's Downloads\Odyssync folder). As SENDER it turns
+// this laptop's sidecar drag reports into
 // network messages and overlay events; as RECEIVER it turns other laptops'
 // messages into overlay events and sidecar commands, and answers the sender.
 // Units: the sidecar speaks physical pixels; the network and the overlay use
 // DIPs. Network `edge` is always the sender's edge; overlay events get THIS
 // screen's edge. No Electron in here, so it can be tested with plain `node`.
 const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const MOVE_MS = 16; // EDGE_DRAG_MOVE at most once per 16 ms
 const MAX_BUFFERED = 64 * 1024; // bytes waiting on the socket before we hold moves back
@@ -15,15 +20,57 @@ const DEFAULT_TIMEOUTS = {
   approval: 30000, // receiver: no Accept/Reject in 30 s -> rejected
   ghost: 500, // receiver: wait this long for the overlay's ghostSettled (its animation takes about 0.26 s)
   open: 4300, // receiver: wait for the sidecar's answer (it tries for 4 s); ghost + this stays under the sender's 5 s
+  fileReply: 60000, // sender: no answer to a file in 60 s -> failed
+  fileReplyApproval: 90000, // the same, when the receiver is in approval mode
+  filePayload: 60000, // receiver: the file's bytes must arrive within 60 s of its commit
 };
 const OPPOSITE = { LEFT: 'RIGHT', RIGHT: 'LEFT', TOP: 'BOTTOM', BOTTOM: 'TOP' };
+const MAX_FILE = 50 * 1024 * 1024; // FILE_PAYLOAD is at most 50 MB
+const DROP_END_MS = 300; // the drop reaches the overlay about when the button goes up: keep the strip this long
+const DROP_START_MS = 200; // a plain click near the edge looks like a drag for a moment: wait this long before showing the strip
 
-// ctx = { transport, getState, bridge?, overlay?, timeouts? }
+// A name that is safe to save on Windows: no folder parts, no illegal characters,
+// no trailing dots or spaces, no device name like CON; "file" if nothing is left.
+function safeName(name) {
+  let s = path.win32.basename(String(name)).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '');
+  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(s)) s = '_' + s;
+  return s || 'file';
+}
+
+// Write the bytes as dir/name, else "name (1).ext", "name (2).ext"...: never over an existing file.
+function writeNew(dir, name, bytes) {
+  const ext = path.extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  for (let i = 0; ; i++) {
+    const full = path.join(dir, i === 0 ? name : `${stem} (${i})${ext}`);
+    let fd;
+    try {
+      fd = fs.openSync(full, 'wx'); // 'wx' = create it, or fail if the name is taken
+    } catch (err) {
+      if (err.code === 'EEXIST' && i < 999) continue;
+      throw err;
+    }
+    try {
+      fs.writeFileSync(fd, bytes);
+    } catch (err) {
+      fs.closeSync(fd);
+      try { fs.unlinkSync(full); } catch {} // our own half-written file: do not leave it behind
+      throw err;
+    }
+    fs.closeSync(fd);
+    return full;
+  }
+}
+
+// ctx = { transport, getState, bridge?, overlay?, timeouts?, notify?, revealFile?, downloadsDir? }
 function createHandoff(ctx) {
   const { transport, getState } = ctx;
   const bridge = ctx.bridge || { send: () => false, onMessage: () => {}, isConnected: () => false };
-  const overlay = ctx.overlay || { send: () => {}, onAnswer: () => {}, onGhostSettled: () => {} };
+  const overlay = { send: () => {}, onAnswer: () => {}, onGhostSettled: () => {}, onFileDropped: () => {}, setDropMode: () => {}, ...ctx.overlay };
   const times = { ...DEFAULT_TIMEOUTS, ...ctx.timeouts };
+  const notify = ctx.notify || (() => {}); // a notice in the Control Center: notify("error", text)
+  const revealFile = ctx.revealFile || (() => {}); // open Explorer with this file selected
+  const downloadsDir = ctx.downloadsDir || path.join(os.homedir(), 'Downloads', 'Odyssync');
 
   let sidecarDpi = null; // dpiScale from SIDECAR_READY, once it has arrived
   let drag = null; // our one drag in progress: { hwnd, browser, url, title, preview, transfer }
@@ -170,10 +217,15 @@ function createHandoff(ctx) {
   }
 
   // A waiting transfer is over: close our window (accepted) or bring it back.
+  // A file has no window: it only gets a notice when it did not arrive.
   function finishOutgoing(t, result) {
     clearTimeout(t.timer);
     waiting.delete(t.id);
-    bridge.send({ type: result === 'PLACED' ? 'CLOSE_WINDOW' : 'SHOW_WINDOW', hwnd: t.hwnd });
+    if (t.file) {
+      if (result === 'FAILED') notify('error', 'File was not delivered');
+    } else {
+      bridge.send({ type: result === 'PLACED' ? 'CLOSE_WINDOW' : 'SHOW_WINDOW', hwnd: t.hwnd });
+    }
     show(result, 'sender', t.edge, t.id);
   }
 
@@ -185,6 +237,77 @@ function createHandoff(ctx) {
     else if (msg.type === 'TRANSFER_REJECTED') finishOutgoing(t, 'REJECTED'); // rule 6
     else finishOutgoing(t, 'FAILED'); // rule 6
   }
+
+  // ================= SENDER: a file dropped on our overlay =================
+
+  let dropEdge = null; // the edge whose drop strip is showing, or null
+  let dropEndTimer = null; // the short wait before the strip goes away
+  let dropStartTimer = null; // the short wait before the strip shows
+
+  // Show the drop strip on this edge and let the overlay catch the drop; null hides it.
+  function setDropEdge(edge) {
+    clearTimeout(dropEndTimer);
+    dropEndTimer = null;
+    clearTimeout(dropStartTimer);
+    dropStartTimer = null;
+    if (dropEdge === edge) return;
+    if (dropEdge) overlay.send({ type: 'FILE_DRAG', role: 'sender', edge: dropEdge, active: false });
+    dropEdge = edge;
+    overlay.setDropMode(!!edge);
+    if (edge) overlay.send({ type: 'FILE_DRAG', role: 'sender', edge, active: true });
+  }
+
+  // Our sidecar: a file is (active) or is no longer dragged near an edge.
+  function onFileDrag(msg) {
+    if (msg.active) {
+      const edge = typeof msg.edge === 'string' && neighbourOn(msg.edge) ? msg.edge : null;
+      if (!edge) return;
+      if (dropEdge) return setDropEdge(edge); // a strip is already showing: follow the drag (also cancels a pending end)
+      // Not showing yet: wait a moment first, so a plain click near the edge never shows the strip.
+      clearTimeout(dropStartTimer);
+      dropStartTimer = setTimeout(() => { if (neighbourOn(edge)) setDropEdge(edge); }, DROP_START_MS);
+      return;
+    }
+    clearTimeout(dropStartTimer); // it ended before the wait was over: it was a click
+    dropStartTimer = null;
+    if (dropEdge && !dropEndTimer) dropEndTimer = setTimeout(() => setDropEdge(null), DROP_END_MS);
+  }
+
+  // The overlay's drop strip got a file: check it, then send it (TRANSFER_COMMIT + FILE_PAYLOAD).
+  function sendFile(edge, filePath, count) {
+    setDropEdge(null); // the drag is over
+    if (count > 1) return notify('error', 'Drop one file at a time');
+    const target = typeof edge === 'string' ? neighbourOn(edge) : null;
+    if (!target) return;
+    let stat;
+    try { stat = fs.statSync(filePath); } catch { return notify('error', 'Could not read that file'); }
+    if (!stat.isFile()) return notify('error', 'Folders cannot be sent. Zip the folder first.');
+    if (stat.size > MAX_FILE) return notify('error', 'File is too large (max 50 MB)');
+    const id = crypto.randomUUID();
+    const filename = path.basename(filePath);
+    const receiverMode = modeOf(target);
+    // Rule 3: the receiver is in focus: the file card bounces back and nothing is sent.
+    if (receiverMode === 'focus') return show('BOUNCE', 'sender', edge, id, { kind: 'file', filename, size: stat.size });
+    let bytes;
+    try { bytes = fs.readFileSync(filePath); } catch { return notify('error', 'Could not read that file'); }
+    if (bytes.length > MAX_FILE) return notify('error', 'File is too large (max 50 MB)'); // it grew meanwhile
+    const size = bytes.length;
+    const sent = transport.sendToPeer(target, {
+      type: 'TRANSFER_COMMIT', transferId: id, kind: 'file', edge, centerRatio: 0.5, width: 320, height: 200, filename, size, direct: false,
+    });
+    if (!sent) return notify('error', 'Could not reach that laptop');
+    transport.sendBinaryToPeer(target, { type: 'FILE_PAYLOAD', transferId: id, filename, mimeType: 'application/octet-stream', size }, bytes);
+    show('COMMIT', 'sender', edge, id, {
+      kind: 'file', title: null, url: null, filename, size,
+      fromName: myProfile().displayName, mode: modeOf(selfId()), direct: false,
+    });
+    const t = { id, target, edge, file: true, timer: null };
+    waiting.set(id, t);
+    const ms = receiverMode === 'approval' ? times.fileReplyApproval : times.fileReply;
+    t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), ms);
+  }
+
+  overlay.onFileDropped((edge, filePath, count) => sendFile(edge, filePath, count));
 
   // ================= RECEIVER: another laptop sends to us =================
 
@@ -201,9 +324,11 @@ function createHandoff(ctx) {
 
   const reply = (r, fields) => transport.sendToPeer(r.from, { transferId: r.id, ...fields });
 
-  // This incoming transfer is over: clear its timer and forget it.
+  // This incoming transfer is over: clear its timers, drop a file's bytes and forget it.
   function forget(r) {
     clearTimeout(r.timer);
+    clearTimeout(r.payloadTimer);
+    r.bytes = null;
     incoming.delete(r.id);
   }
 
@@ -267,8 +392,9 @@ function createHandoff(ctx) {
       if (hadGhost) show('CANCEL', 'receiver', r.edge, r.id);
       return reply(r, { type: 'TRANSFER_REJECTED', reason: 'focus' });
     }
+    if (msg.kind === 'file') return onFileCommit(r, msg, myMode); // a file needs no sidecar
     if (msg.kind !== 'tab') {
-      forget(r); // files come later
+      forget(r);
       return reply(r, { type: 'TRANSFER_FAILED', error: 'unsupported' });
     }
     if (!bridge.isConnected()) {
@@ -288,13 +414,58 @@ function createHandoff(ctx) {
     waitForGhost(r); // receiver rule 1: collaborative
   }
 
+  // A file is coming; its bytes follow in FILE_PAYLOAD and must arrive within
+  // filePayload ms of this commit. stage: 'file-approval' (waiting for Accept) or
+  // 'file' (save as soon as the bytes are here).
+  function onFileCommit(r, msg, myMode) {
+    const { filename, size } = msg;
+    if (typeof filename !== 'string' || !Number.isInteger(size) || size < 0 || size > MAX_FILE) {
+      forget(r);
+      return reply(r, { type: 'TRANSFER_FAILED', error: 'invalid' });
+    }
+    show('COMMIT', 'receiver', r.edge, r.id, {
+      kind: 'file', title: null, url: null, filename, size,
+      fromName: nameOf(msg.fromId), mode: myMode, direct: !!msg.direct,
+    });
+    r.payloadTimer = setTimeout(() => endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'timeout' }), times.filePayload);
+    if (myMode === 'approval') {
+      r.stage = 'file-approval';
+      r.timer = setTimeout(() => endIncoming(r, 'REJECTED', { type: 'TRANSFER_REJECTED', reason: 'timeout' }), times.approval);
+      return;
+    }
+    r.stage = 'file';
+  }
+
+  // The file's bytes arrived (once, from its sender).
+  function onFileBytes(r, bytes) {
+    clearTimeout(r.payloadTimer);
+    if (bytes.length !== r.commit.size) return endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'size mismatch' });
+    r.bytes = bytes;
+    if (r.stage === 'file') saveFile(r);
+  }
+
+  // Save into Downloads\Odyssync under a new name, show it in Explorer, tell the sender.
+  function saveFile(r) {
+    let full;
+    try {
+      fs.mkdirSync(downloadsDir, { recursive: true });
+      full = writeNew(downloadsDir, safeName(r.commit.filename), r.bytes);
+    } catch {
+      return endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'could not save' });
+    }
+    try { revealFile(full); } catch (err) { console.log('[handoff] could not show the file: ' + err.message); }
+    endIncoming(r, 'PLACED', { type: 'TRANSFER_ACCEPTED' });
+  }
+
   // The Approval card's answer.
   overlay.onAnswer((transferId, accepted) => {
     const r = incoming.get(transferId);
-    if (!r || r.stage !== 'approval') return;
+    if (!r || (r.stage !== 'approval' && r.stage !== 'file-approval')) return;
     clearTimeout(r.timer);
-    if (accepted) waitForGhost(r);
-    else endIncoming(r, 'REJECTED', { type: 'TRANSFER_REJECTED', reason: 'rejected' });
+    if (!accepted) return endIncoming(r, 'REJECTED', { type: 'TRANSFER_REJECTED', reason: 'rejected' });
+    if (r.stage === 'approval') return waitForGhost(r);
+    r.stage = 'file'; // a file: save now if the bytes are already here, else when they come
+    if (r.bytes) saveFile(r);
   });
 
   // Where the ghost ended (DIPs). Kept for later if we are not ready for it yet.
@@ -335,6 +506,9 @@ function createHandoff(ctx) {
       case 'TRANSFER_COMMIT':
         if (r && r.from !== msg.fromId) return;
         return onCommit(msg);
+      case 'FILE_PAYLOAD':
+        if (!r || r.from !== msg.fromId || !r.commit || r.commit.kind !== 'file' || r.bytes || !payload) return;
+        return onFileBytes(r, payload);
       case 'TRANSFER_ACCEPTED':
       case 'TRANSFER_REJECTED':
       case 'TRANSFER_FAILED':
@@ -354,6 +528,7 @@ function createHandoff(ctx) {
       case 'LOCAL_WINDOW_PREVIEW': return onPreview(msg, payload);
       case 'LOCAL_DRAG_MOVE': return onDragMove(msg);
       case 'LOCAL_DRAG_END': return onDragEnd(msg);
+      case 'LOCAL_FILE_DRAG': return onFileDrag(msg);
       case 'WINDOW_PLACED': {
         const r = incoming.get(msg.transferId);
         if (r && r.stage === 'opening') endIncoming(r, 'PLACED', { type: 'TRANSFER_ACCEPTED' });
@@ -373,6 +548,7 @@ function createHandoff(ctx) {
   // Called after every room change. Anything tied to a laptop that is no longer
   // a member (or to us, after we left the room) ends now; no timer is left behind.
   function roomChanged() {
+    if (dropEdge && !neighbourOn(dropEdge)) setDropEdge(null); // left the room, or the neighbour went
     const t = drag && drag.transfer;
     if (t && !isMember(t.target)) {
       clearTimeout(t.moveTimer);

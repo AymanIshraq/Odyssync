@@ -6,6 +6,7 @@ const { WebSocketServer } = require('ws');
 
 const MAX_MEMBERS = 8;
 const HEARTBEAT_MS = 800; // worst case to spot a dead laptop is 3 beats, so 800 ms keeps it under 3 s
+const DRAIN_GRACE_MS = 15000; // after a big download's last bytes leave us they are still on the way: give the laptop this long to answer
 
 function start({ port, local }) {
   const rooms = {}; // roomNumber -> { pin, hostId, hostLocalIps, localPort, members }
@@ -146,8 +147,24 @@ function start({ port, local }) {
   });
 
   // Heartbeat: a ws-level ping every beat; two unanswered in a row means the laptop is gone.
+  // But a laptop busy with a big file cannot answer in time (our ping or its pong is stuck
+  // behind the file's bytes), so it also counts as alive while data really moves:
+  // - new bytes arrived from it since the last beat (it is uploading), or
+  // - the bytes waiting to go out to it got fewer (it is downloading, really taking them).
+  // Bytes we write never count: the computer happily accepts our tiny pings even for a
+  // dead laptop, so "we sent something" would keep a dead laptop alive forever.
+  // When the waiting bytes run out, the last of them are still on their way (its answer is
+  // stuck behind them), so it gets DRAIN_GRACE_MS more. A dead laptop's queue never empties.
   const timer = setInterval(() => {
     for (const socket of server.clients) {
+      const tcp = socket._socket || {}; // the raw connection under the WebSocket (may be closing)
+      const read = tcp.bytesRead || 0;
+      const waiting = (tcp._handle && tcp._handle.writeQueueSize) || 0;
+      if (waiting === 0 && socket.lastWaiting > 0) socket.graceUntil = Date.now() + DRAIN_GRACE_MS;
+      const inGrace = Date.now() < socket.graceUntil;
+      if (read !== socket.lastRead || waiting < socket.lastWaiting || inGrace) socket.missedPings = 0;
+      socket.lastRead = read;
+      socket.lastWaiting = waiting;
       if (socket.missedPings >= 2) {
         socket.lost = true;
         socket.terminate();

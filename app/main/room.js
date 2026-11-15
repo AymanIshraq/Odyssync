@@ -56,7 +56,7 @@ function activeEdges(state) {
   return { left: has('left'), right: has('right'), top: has('top'), bottom: has('bottom') };
 }
 
-function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge, overlay }) {
+function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge, overlay, revealFile }) {
   const deviceId = crypto.randomBytes(4).toString('hex');
   const profile = { ...startProfile };
   const transport = createTransport(deviceId); // one for the whole life, so mids never restart
@@ -68,7 +68,7 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
   let waiting = null; // one server answer we are waiting for
   const stateListeners = [];
   const noticeListeners = [];
-  const handoff = createHandoff({ transport, getState, bridge, overlay }); // the tab handoff (handoff.js)
+  const handoff = createHandoff({ transport, getState, bridge, overlay, revealFile, notify: (kind, text) => notify(kind, text) }); // tab and file handoff (handoff.js)
   stateListeners.push(() => handoff.roomChanged()); // after every room change: did someone leave?
 
   // ---------- state out ----------
@@ -354,13 +354,26 @@ function wireIpc(ipcMain, getControlWindow, manager) {
 // Connect the overlay window: returns the `overlay` object the handoff uses.
 // Events go to the overlay page; its answers come back here.
 function wireOverlay(ipcMain, getOverlayWindow) {
-  const win = () => { const w = getOverlayWindow(); return w && !w.isDestroyed() ? w : null; };
-  // The Approval card needs clicks; the rest of the overlay stays click-through.
-  ipcMain.on('overlay:setInteractive', (_e, on) => { const w = win(); if (w) w.setIgnoreMouseEvents(!on, { forward: true }); });
+  let guarded = null; // the overlay window we already stopped from navigating
+  const win = () => {
+    const w = getOverlayWindow();
+    if (!w || w.isDestroyed()) return null;
+    // A file dropped on the overlay must never open in it: the page never leaves.
+    if (guarded !== w) { guarded = w; w.webContents.on('will-navigate', (e) => e.preventDefault()); }
+    return w;
+  };
+  // The overlay catches the mouse while the Approval card wants clicks or a file
+  // drag wants its drop; otherwise it stays click-through.
+  let cardWantsClicks = false;
+  let dropMode = false;
+  const applyMouse = () => { const w = win(); if (w) w.setIgnoreMouseEvents(!(cardWantsClicks || dropMode), { forward: true }); };
+  ipcMain.on('overlay:setInteractive', (_e, on) => { cardWantsClicks = !!on; applyMouse(); });
   return {
     send: (event) => { const w = win(); if (w) w.webContents.send('overlay:event', event); },
     onAnswer: (cb) => ipcMain.on('overlay:answer', (_e, transferId, accepted) => cb(transferId, accepted)),
     onGhostSettled: (cb) => ipcMain.on('overlay:ghostSettled', (_e, transferId, rect) => cb(transferId, rect)),
+    onFileDropped: (cb) => ipcMain.on('overlay:fileDropped', (_e, edge, path, count) => cb(edge, path, count)),
+    setDropMode: (on) => { dropMode = !!on; applyMouse(); },
   };
 }
 
