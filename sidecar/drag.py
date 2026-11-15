@@ -1,6 +1,8 @@
 """Platform-independent drag lifecycle and physical-pixel edge geometry."""
 
 from dataclasses import dataclass
+
+TRANSFER_EDGE_PX = 20  # Physical-pixel release tolerance for mouse and touch.
 import re
 from urllib.parse import quote, unquote
 
@@ -120,7 +122,7 @@ def geometry(sample: Sample, screen: tuple[int, int], active: set[str]) -> dict:
             "centerRatio": max(0.0, min(1.0, ratio)),
             "width": right - left, "height": bottom - top,
             "cursorX": x, "cursorY": y,
-            "cursorAtEdge": edge is not None and cursor_distances[edge] <= 4}
+            "cursorAtEdge": edge is not None and cursor_distances[edge] <= TRANSFER_EDGE_PX}
 
 
 class DragTracker:

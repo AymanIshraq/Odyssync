@@ -5,7 +5,7 @@
   function geometry(event, view) {
     const vertical = event.edge === 'LEFT' || event.edge === 'RIGHT';
     const length = Math.min(300, vertical ? view.height : view.width);
-    const thickness = Math.min(14, vertical ? view.width : view.height);
+    const thickness = Math.min(20, vertical ? view.width : view.height);
     const ratio = Number.isFinite(event.centerRatio) ? clamp(event.centerRatio, 0, 1) : 0.5;
     const along = clamp(ratio * (vertical ? view.height : view.width) - length / 2,
       0, (vertical ? view.height : view.width) - length);

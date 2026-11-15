@@ -176,7 +176,7 @@ Electron → sidecar:
 | `OPEN_URL` | `transferId, url, browser, expiresAt?, x, y, width, height` |
 | `OPEN_FILE` | `transferId, path, app?, expiresAt?, x, y, width, height` (document extension below) |
 
-`cursorAtEdge` is true when the cursor is within 4 px of the screen edge.
+`cursorAtEdge` is true when the cursor is within 20 physical pixels of the screen edge (inclusive). The visible bezel is 20 DIPs thick.
 
 ### Document-window extension (combined 0.1.4 branch)
 

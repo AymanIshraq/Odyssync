@@ -31,6 +31,17 @@ class DragTests(unittest.TestCase):
                 self.assertTrue(fields["cursorAtEdge"])
                 self.assertLessEqual(fields["centerRatio"], 1)
 
+    def test_touch_release_threshold_on_all_edges(self):
+        for edge in ("LEFT", "RIGHT", "TOP", "BOTTOM"):
+            for distance in (19, 20, 21):
+                cursor = {"LEFT": (distance, 400), "RIGHT": (999 - distance, 400),
+                          "TOP": (500, distance), "BOTTOM": (500, 799 - distance)}[edge]
+                with self.subTest(edge=edge, distance=distance):
+                    fields = geometry(sample(cursor=cursor), (1000, 800), {edge})
+                    self.assertEqual(fields["cursorAtEdge"], distance <= 20)
+                    disabled = geometry(sample(cursor=cursor), (1000, 800), set())
+                    self.assertFalse(disabled["cursorAtEdge"])
+
     def test_disabled_and_outside_edges(self):
         self.assertIsNone(geometry(sample(), (1000, 800), set())["edge"])
         self.assertIsNone(geometry(sample(rect=(200, 200, 600, 600)),

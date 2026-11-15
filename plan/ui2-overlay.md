@@ -40,7 +40,7 @@ All four edges (E4.7).
 
 ## Item 2 — bezel glow (after hour 6)  → E5.1
 
-On `DRAG_MOVE` for both roles: a 14 px by 300 px glowing strip on the edge
+On `DRAG_MOVE` for both roles: a 20 DIP by 300 DIP glowing strip on the edge
 following `centerRatio`, coloured by the event's `mode`.
 
 ## Item 3 — Focus bounce and Approval card  → E5.3–E5.5
