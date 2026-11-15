@@ -1,5 +1,5 @@
-pywin32
-uiautomation
-Pillow
-mss
-websockets
+pywin32>=308,<400
+uiautomation>=2.0.20,<3
+websockets>=15,<16
+Pillow>=11,<13
+mss>=10,<11
