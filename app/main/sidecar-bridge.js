@@ -128,14 +128,22 @@ function start() {
   });
 }
 
-// For app quit: no more restarts, end Python, close everything.
-function stop() {
+// For app quit: no more restarts, close the link, then end Python.
+// Closing the link makes the sidecar show again any window it had hidden,
+// so if Python is running we give it 500 ms for that before we end it.
+// done (optional) is called when all of this is finished.
+function stop(done) {
   stopped = true;
   clearTimeout(restartTimer);
   restartTimer = null;
-  if (child) { child.kill(); child = null; }
   if (sidecar) { const s = sidecar; sidecar = null; s.terminate(); }
   if (server) { server.close(); server = null; }
+  const proc = child;
+  if (!proc) { if (done) done(); return; } // no Python running: nothing to wait for
+  setTimeout(() => {
+    if (child === proc) { proc.kill(); child = null; } // still running: end it now
+    if (done) done();
+  }, 500);
 }
 
 // Send one JSON message to the sidecar. false if no sidecar is connected.

@@ -28,7 +28,7 @@
     check('machine name supplied by API',d.querySelector('#name').value==='DESKTOP-DEMO');
     d.querySelector('#join').click();const fill=(g,value)=>d.querySelectorAll(`[data-group="${g}"]`).forEach((el,i)=>el.value=value[i]);
     check('join opens a native modal with input focus',d.querySelector('dialog').open&&d.activeElement.matches('input'));
-    fill('room','482916');fill('pin','0000');d.querySelector('form').requestSubmit();await tick();check('bad PIN stays on join and shows reason',d.querySelector('#error').textContent==='bad_pin'&&!!d.querySelector('form'));
+    fill('room','482916');fill('pin','0000');d.querySelector('form').requestSubmit();await tick();check('bad PIN stays on join and shows reason',d.querySelector('#error').textContent==='Wrong PIN. Check it and try again.'&&!!d.querySelector('form'));
     d.querySelector('#direct').click();check('direct IP replaces room number',!!d.querySelector('#ip')&&!d.querySelector('[data-group="room"]'));
     d.querySelector('#ip').value='192.168.137.1';fill('pin','1234');d.querySelector('form').requestSubmit();await tick();check('direct join opens read-only room',!!d.querySelector('#canvas')&&!d.querySelector('.host-draggable'));
     w.previewControls.notice('room_closed','Room closed test');check('room closed returns to launch with text',!!d.querySelector('#create')&&d.querySelector('#message').textContent==='Room closed test');

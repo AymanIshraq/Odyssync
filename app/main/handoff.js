@@ -13,8 +13,8 @@ const DEFAULT_TIMEOUTS = {
   reply: 5000, // sender: no answer in 5 s -> window comes back
   replyApproval: 35000, // the same, when the receiver is in approval mode
   approval: 30000, // receiver: no Accept/Reject in 30 s -> rejected
-  ghost: 1000, // receiver: wait this long for the overlay's ghostSettled
-  open: 3500, // receiver: wait for the sidecar's WINDOW_PLACED (ghost 1 s + this stays under the sender's 5 s)
+  ghost: 500, // receiver: wait this long for the overlay's ghostSettled (its animation takes about 0.26 s)
+  open: 4300, // receiver: wait for the sidecar's answer (it tries for 4 s); ghost + this stays under the sender's 5 s
 };
 const OPPOSITE = { LEFT: 'RIGHT', RIGHT: 'LEFT', TOP: 'BOTTOM', BOTTOM: 'TOP' };
 
@@ -235,7 +235,7 @@ function createHandoff(ctx) {
     return clampRect({ x: along(w, W), y: H - h, width: w, height: h });
   }
 
-  // Wait (up to 1 s) for the overlay to say where the ghost ended, then open the tab.
+  // Wait (up to 0.5 s) for the overlay to say where the ghost ended, then open the tab.
   function waitForGhost(r) {
     if (r.rect) return openTab(r); // it already arrived
     r.stage = 'ghost';

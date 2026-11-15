@@ -54,8 +54,17 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => app.quit());
-app.on('before-quit', () => manager && manager.leaveRoom()); // others see us leave at once
-app.on('before-quit', () => sidecarBridge.stop());
+let quitting = false; // true once the tidy-up has started
+let tidied = false; // true once it has finished: now the app may really quit
+app.on('before-quit', (e) => {
+  if (tidied) return;
+  e.preventDefault(); // wait: the sidecar may need a moment to show hidden windows
+  if (quitting) return; // a second quit request while we wait: keep waiting
+  quitting = true;
+  const finish = () => { tidied = true; setImmediate(() => app.quit()); };
+  try { if (manager) manager.leaveRoom(); } catch (err) { console.log('[app] leave on quit failed: ' + err.message); } // others see us leave at once
+  try { sidecarBridge.stop(finish); } catch (err) { console.log('[app] sidecar stop failed: ' + err.message); finish(); }
+});
 
 module.exports = {
   getControlWindow: () => controlWin,

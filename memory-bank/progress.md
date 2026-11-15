@@ -2,7 +2,7 @@
 
 Last updated: 2026-11-15
 
-**Overall: about 23% built. About 77% left.** Four people (two tech, two UI); 16 hours remained when planning began.
+**Overall: about 25% built. About 75% left.** Four people (two tech, two UI); 16 hours remained when planning began.
 
 Percentages are each component's share of all the work. Every tier is in scope.
 
@@ -58,7 +58,7 @@ percentages below remain at 0% accepted (100% acceptance work remains).
 
 | # | Component | Track | Share | Done |
 |---|---|---|---|---|
-| 17 | Cloud relay deployed, room-number join | T2, U1 | 5% | 40% (room-number join works against a relay on the same machine; Railway deploy and UI left) |
+| 17 | Cloud relay deployed, room-number join | T2, U1 | 5% | 85% (relay live on Railway at `wss://odyssync-production.up.railway.app`, address in `app/config.json`; create and join by room number + PIN verified through it from one Mac with the real app as host; two real laptops on different networks not yet tried) |
 | 18 | Local upgrade race and failover | T2 | 5% | 0% |
 
 ## Voice assistant (6%), added 2026-11-14

@@ -217,7 +217,7 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
   transport.onClose((path) => {
     if (waiting && waiting.path === path) waiting.done(null);
     if (!room) return;
-    if (!PATHS.some(transport.isOpen)) return endRoom('error', 'Connection lost');
+    if (!PATHS.some(transport.isOpen)) return endRoom('room_closed', 'Connection lost');
     Object.keys(room.members).forEach((id) => dropPath(id, path)); // carry on over the other path
     emit();
   });

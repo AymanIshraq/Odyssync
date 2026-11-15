@@ -2383,14 +2383,14 @@ Any other kind is not for this code (the drag notes come in file 11). After any 
   transport.onClose((path) => {
     if (waiting && waiting.path === path) waiting.done(null);
     if (!room) return;
-    if (!PATHS.some(transport.isOpen)) return endRoom('error', 'Connection lost');
+    if (!PATHS.some(transport.isOpen)) return endRoom('room_closed', 'Connection lost');
     Object.keys(room.members).forEach((id) => dropPath(id, path)); // carry on over the other path
     emit();
   });
 ```
 "Mail carrier, when a line drops by surprise, do this."
 - Anyone waiting for an answer on it gets "nothing".
-- If **no line is left**, the room is over: popup "Connection lost".
+- If **no line is left**, the room is over: popup "Connection lost". The popup is marked as the `room_closed` kind, because that's the kind that makes the Control Center go back to its launch screen.
 - Otherwise cross every friend off the dead line (friends only on that line disappear) and carry on with the other one.
 
 ## The buttons
@@ -2683,7 +2683,7 @@ Make the room brain and plug it into the walkie-talkie for the Control Center wi
 ```js
 app.on('before-quit', () => manager && manager.leaveRoom()); // others see us leave at once
 ```
-"Just before the app quits, leave the room", so friends see this laptop disappear straight away.
+"Just before the app quits, leave the room", so friends see this laptop disappear straight away. *(This line was later folded into a bigger quit recipe; see "Two new lines in `index.js`" in the File 10 section.)*
 
 ---
 
@@ -2937,17 +2937,37 @@ Doing this only after the door opens means a second copy of the app never starts
 ## Shutting down, sending, and the public buttons
 
 ```js
-// For app quit: no more restarts, end Python, close everything.
-function stop() {
+// For app quit: no more restarts, close the link, then end Python.
+// Closing the link makes the sidecar show again any window it had hidden,
+// so if Python is running we give it 500 ms for that before we end it.
+// done (optional) is called when all of this is finished.
+function stop(done) {
   stopped = true;
   clearTimeout(restartTimer);
   restartTimer = null;
-  if (child) { child.kill(); child = null; }
+```
+For when you quit Odyssync. `done` = an optional "tell me when you've finished" phone number. First: raise the "shutting down" flag and cancel any restart alarm.
+
+```js
   if (sidecar) { const s = sidecar; sidecar = null; s.terminate(); }
   if (server) { server.close(); server = null; }
+```
+**Cut the helper's phone line and close the exchange.** This comes first on purpose: when Tech 1's helper notices the line is gone, it **shows again any window it had hidden**. That's the safety net for a handoff that was still waiting for its answer.
+
+```js
+  const proc = child;
+  if (!proc) { if (done) done(); return; } // no Python running: nothing to wait for
+```
+If we never started a Python helper (for example on a Mac), there's nothing to wait for: say "finished" straight away.
+
+```js
+  setTimeout(() => {
+    if (child === proc) { proc.kill(); child = null; } // still running: end it now
+    if (done) done();
+  }, 500);
 }
 ```
-For when you quit Odyssync: raise the "shutting down" flag, cancel any restart alarm, **stop the Python helper**, cut its line, and close the exchange. Nothing is left running in the background.
+Otherwise **wait half a second**, so the helper has time to put hidden windows back. Then stop the helper (if it's still the same one, still running) and say "finished". Nothing is left running in the background, and no window stays hidden.
 
 ```js
 // Send one JSON message to the sidecar. false if no sidecar is connected.
@@ -3006,9 +3026,35 @@ A screen that's on the chart but that I can't actually reach doesn't count.
 "Every time the room's situation changes, work out my edges and tell the bridge." This is how the Python helper learns where neighbours are, so it only watches those edges.
 
 ```js
-app.on('before-quit', () => sidecarBridge.stop());
+let quitting = false; // true once the tidy-up has started
+let tidied = false; // true once it has finished: now the app may really quit
 ```
-"Just before the app quits, shut the bridge down", which also stops the Python helper.
+*(Changed after the whole-project review. These lines replace the two older "before the app quits" lines, including the one in the File 9 section.)* Two yes/no boxes: "have we started tidying up?" and "have we finished?".
+
+```js
+app.on('before-quit', (e) => {
+  if (tidied) return;
+  e.preventDefault(); // wait: the sidecar may need a moment to show hidden windows
+  if (quitting) return; // a second quit request while we wait: keep waiting
+  quitting = true;
+```
+"Just before the app quits":
+- if the tidy-up is finished, let the quit go ahead
+- otherwise **hold the quit** (`preventDefault` = "don't do the usual thing yet")
+- if tidying has already started (someone pressed quit twice), just keep waiting
+- otherwise note that tidying has started
+
+```js
+  const finish = () => { tidied = true; setImmediate(() => app.quit()); };
+```
+A tiny recipe for "we're done": mark it finished, and ask the app to quit again in a moment (`setImmediate` = "right after this"). This time the quit goes through.
+
+```js
+  try { if (manager) manager.leaveRoom(); } catch (err) { console.log('[app] leave on quit failed: ' + err.message); } // others see us leave at once
+  try { sidecarBridge.stop(finish); } catch (err) { console.log('[app] sidecar stop failed: ' + err.message); finish(); }
+});
+```
+Leave the room (so friends see this laptop disappear at once), then shut the bridge down and call `finish` when it's done. Each step is inside a `try`, so even if one fails, the app still quits and never hangs.
 
 ---
 
@@ -3062,18 +3108,18 @@ const DEFAULT_TIMEOUTS = {
   reply: 5000, // sender: no answer in 5 s -> window comes back
   replyApproval: 35000, // the same, when the receiver is in approval mode
   approval: 30000, // receiver: no Accept/Reject in 30 s -> rejected
-  ghost: 1000, // receiver: wait this long for the overlay's ghostSettled
-  open: 3500, // receiver: wait for the sidecar's WINDOW_PLACED (ghost 1 s + this stays under the sender's 5 s)
+  ghost: 500, // receiver: wait this long for the overlay's ghostSettled (its animation takes about 0.26 s)
+  open: 4300, // receiver: wait for the sidecar's answer (it tries for 4 s); ghost + this stays under the sender's 5 s
 };
 ```
 All the waiting times, in thousandths of a second:
 - **5 s**: the sender waits this long for an answer, then takes its window back
 - **35 s**: the same, when the receiver must click Accept first
 - **30 s**: how long the Accept/Reject card waits for a click
-- **1 s**: how long the receiver waits for the overlay to say where the picture stopped
-- **3.5 s**: how long the receiver waits for the real window to open
+- **0.5 s**: how long the receiver waits for the overlay to say where the picture stopped (the animation takes about a quarter of a second)
+- **4.3 s**: how long the receiver waits for the real window to open (Tech 1's Python helper itself keeps trying for 4 s, so we wait a little longer than that)
 
-1 s + 3.5 s is less than the sender's 5 s. So the receiver always gives up **before** the sender does, and the two never disagree about who has the tab.
+0.5 s + 4.3 s is less than the sender's 5 s. So the receiver always gives up **before** the sender does, and the two never disagree about who has the tab.
 
 ```js
 const OPPOSITE = { LEFT: 'RIGHT', RIGHT: 'LEFT', TOP: 'BOTTOM', BOTTOM: 'TOP' };
@@ -3450,14 +3496,14 @@ The **backup plan** if the glass never says where the picture stopped. Take the 
 Put the box right against the edge it came in from: left, right, top or bottom.
 
 ```js
-  // Wait (up to 1 s) for the overlay to say where the ghost ended, then open the tab.
+  // Wait (up to 0.5 s) for the overlay to say where the ghost ended, then open the tab.
   function waitForGhost(r) {
     if (r.rect) return openTab(r); // it already arrived
     r.stage = 'ghost';
     r.timer = setTimeout(() => openTab(r), times.ghost);
   }
 ```
-If the glass already reported where the picture stopped, open the tab now. Otherwise wait up to 1 second, then open it anyway.
+If the glass already reported where the picture stopped, open the tab now. Otherwise wait up to half a second, then open it anyway.
 
 ```js
   // Ask our sidecar to open the URL at the ghost's spot (physical pixels).
@@ -3477,7 +3523,7 @@ If the glass already reported where the picture stopped, open the tab now. Other
     r.timer = setTimeout(() => endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'timeout' }), times.open);
   }
 ```
-If there's no helper to tell, fail at once so the sender gets its window back. Otherwise the stage is `opening`, with an alarm clock: if the helper hasn't confirmed in 3.5 seconds, fail.
+If there's no helper to tell, fail at once so the sender gets its window back. Otherwise the stage is `opening`, with an alarm clock: if the helper hasn't confirmed in 4.3 seconds, fail.
 
 ### The sender let go: `TRANSFER_COMMIT` arrives
 
@@ -3754,6 +3800,34 @@ Hand back three things for the handoff brain: "tell the glass something", "tell 
   manager = room.createRoomManager({ relayUrl: config.relayUrl, localPort: config.localPort, profile, bridge: sidecarBridge, overlay: room.wireOverlay(ipcMain, () => overlayWin) });
 ```
 The line that makes the room brain now also hands it the robot phone (`bridge`) and the wired-up glass window (`overlay`).
+
+---
+
+# Small changes to UI 1's `app/control/control.js` (after the whole-project review)
+
+UI 1 wrote this file. Only four lines were touched, so the host's address is visible and join errors read as sentences.
+
+```js
+const joinErrors = {bad_pin:'Wrong PIN. Check it and try again.', no_room:'No room with that number.', full:'The room is full.', unreachable:'Could not reach the room. Check the connection or the IP address.'};
+```
+A lookup form: for each short error code the room code can send back, the **sentence** to show a person.
+
+```js
+if (!result.ok) { error(joinErrors[result.reason] || result.reason || 'Could not join the room.'); return; }
+```
+When joining fails: show the sentence for that code. If the code isn't in the lookup, show the code itself, and if there's no code at all, show "Could not join the room."
+
+```js
+${state.localIps?.length ? `<div><span class="label">Host IP</span><strong class="ips">${esc(state.localIps.join(', '))}</strong></div>` : ''}
+```
+Inside the room screen's top box, after the room number and PIN: **if** the state has at least one address (`?.length` = "how many, if the list exists"), add a third block labelled "Host IP" showing the addresses separated by commas. `esc(...)` is UI 1's own cleaner that makes text safe to put on a page. If there are no addresses, add nothing.
+
+```js
+const text = `Join Odyssync\nRoom: ${state.roomNumber || 'Direct IP'}\nPIN: ${state.pin || ''}${state.localIps?.length ? `\nHost IP: ${state.localIps.join(', ')}` : ''}`;
+```
+The text the **Copy Invite** button copies. It used to end after the PIN. Now, if there are addresses, it adds one more line: "Host IP: …". (`\n` = "start a new line".)
+
+In UI 1's test file `tests.js`, one expected text changed from the code `bad_pin` to the sentence "Wrong PIN. Check it and try again.", to match.
 
 ---
 

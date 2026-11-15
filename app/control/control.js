@@ -13,6 +13,7 @@
   const isPreview = document.body.dataset.preview === 'true';
   function notify(text) { message.textContent = text; message.hidden = !text; }
   function error(text) { const el = document.querySelector('#error'); if (el) el.textContent = text; else notify(text); }
+  const joinErrors = {bad_pin:'Wrong PIN. Check it and try again.', no_room:'No room with that number.', full:'The room is full.', unreachable:'Could not reach the room. Check the connection or the IP address.'};
   function setBusy(value) {
     busy = value;
     app.querySelectorAll('button,input').forEach(el => {
@@ -121,7 +122,7 @@
         action(async token => {
           const result = await api.joinRoom(payload);
           if (token !== operation) return;
-          if (!result.ok) { error(result.reason || 'Could not join the room.'); return; }
+          if (!result.ok) { error(joinErrors[result.reason] || result.reason || 'Could not join the room.'); return; }
           view = 'room'; dialogKind = null; render();
         });
       }
@@ -131,7 +132,7 @@
   }
   function renderRoom() {
     const screens = state.screens || [];
-    app.innerHTML = `<div class="workspace-window">${header()}<div class="workspace-body"><section class="room-top"><div><span class="eyebrow">Workspace / ${state.isHost ? 'Host' : 'Member'}</span><h1>Your workspace</h1></div><button class="secondary" id="copy">Copy Invite <span aria-hidden="true">⧉</span></button></section><section class="invite"><div><span class="label">Room number</span><strong>${esc(state.roomNumber || '—')}</strong></div><div><span class="label">Room PIN</span><strong>${esc(state.pin || '—')}</strong></div></section><section class="canvas-panel"><div class="canvas-heading"><div><h2><span class="section-index">01</span> Workspace devices</h2><p>${state.isHost ? 'Drag over a laptop to swap, or beside it to arrange your desk.' : 'Your host arranges the screens. Changes appear here live.'}</p></div><span class="count">${screens.length} ${screens.length === 1 ? 'screen' : 'screens'}</span></div><div class="canvas" id="canvas" aria-label="Laptop layout"></div><div class="canvas-footer">${state.isHost ? 'Keyboard: focus a laptop, use arrow keys, then Enter to place or swap.' : 'View only · Your host manages this layout.'}</div></section><div class="workspace-exit"><button class="leave-button" id="leave"><span aria-hidden="true">⇥</span> ${state.isHost ? 'End Room' : 'Leave'}</button></div></div><footer class="landing-footer"><span>${isPreview ? 'Demo · No laptops connected' : 'Odyssync · Control Center'}</span><span>${state.isHost ? 'Host controls' : 'Member view'}</span></footer></div>`;
+    app.innerHTML = `<div class="workspace-window">${header()}<div class="workspace-body"><section class="room-top"><div><span class="eyebrow">Workspace / ${state.isHost ? 'Host' : 'Member'}</span><h1>Your workspace</h1></div><button class="secondary" id="copy">Copy Invite <span aria-hidden="true">⧉</span></button></section><section class="invite"><div><span class="label">Room number</span><strong>${esc(state.roomNumber || '—')}</strong></div><div><span class="label">Room PIN</span><strong>${esc(state.pin || '—')}</strong></div>${state.localIps?.length ? `<div><span class="label">Host IP</span><strong class="ips">${esc(state.localIps.join(', '))}</strong></div>` : ''}</section><section class="canvas-panel"><div class="canvas-heading"><div><h2><span class="section-index">01</span> Workspace devices</h2><p>${state.isHost ? 'Drag over a laptop to swap, or beside it to arrange your desk.' : 'Your host arranges the screens. Changes appear here live.'}</p></div><span class="count">${screens.length} ${screens.length === 1 ? 'screen' : 'screens'}</span></div><div class="canvas" id="canvas" aria-label="Laptop layout"></div><div class="canvas-footer">${state.isHost ? 'Keyboard: focus a laptop, use arrow keys, then Enter to place or swap.' : 'View only · Your host manages this layout.'}</div></section><div class="workspace-exit"><button class="leave-button" id="leave"><span aria-hidden="true">⇥</span> ${state.isHost ? 'End Room' : 'Leave'}</button></div></div><footer class="landing-footer"><span>${isPreview ? 'Demo · No laptops connected' : 'Odyssync · Control Center'}</span><span>${state.isHost ? 'Host controls' : 'Member view'}</span></footer></div>`;
     bindTheme();
     if (state.isHost) {
     const tools = document.createElement('section');
@@ -172,7 +173,7 @@
       });
     });
     document.querySelector('#copy').onclick = async () => {
-      const text = `Join Odyssync\nRoom: ${state.roomNumber || 'Direct IP'}\nPIN: ${state.pin || ''}`;
+      const text = `Join Odyssync\nRoom: ${state.roomNumber || 'Direct IP'}\nPIN: ${state.pin || ''}${state.localIps?.length ? `\nHost IP: ${state.localIps.join(', ')}` : ''}`;
       try { await navigator.clipboard.writeText(text); notify('Invite copied.'); }
       catch { notify(`Copy invite: ${text}`); }
     };
