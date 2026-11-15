@@ -143,7 +143,8 @@ class DragTracker:
 
     def qualify(self, generation: int, info: dict):
         if (generation != self.generation or self.hwnd != info.get("hwnd")
-                or info.get("tabCount") != 1 or not info.get("url")):
+                or type(info.get("tabCount")) is not int or info["tabCount"] < 1
+                or not info.get("url")):
             return None
         self.started = True
         return {"type": "LOCAL_DRAG_START", **info}

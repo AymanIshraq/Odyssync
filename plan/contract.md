@@ -129,6 +129,11 @@ once per 16 ms; if the socket is backed up, only the newest is sent.
 
 ### Sender rules (in `main/room.js`)
 
+User-approved update: dragging a browser window with multiple tabs sends only
+the selected tab's URL. On acceptance, `CLOSE_WINDOW` closes that entire source
+window, including the untransferred tabs. Failure, rejection and timeout restore
+the source window with all its tabs. No other tab URLs are read or transferred.
+
 1. Drag enters an edge that has a neighbour → new `transferId`, forward preview and moves.
 2. Release with the cursor **not** at the edge → `EDGE_DRAG_CANCEL`.
 3. Release at the edge, receiver in `focus` → `BOUNCE_WINDOW`, nothing sent but a cancel.
@@ -153,7 +158,7 @@ Sidecar → Electron:
 | Message | Fields |
 |---|---|
 | `SIDECAR_READY` | `screenWidth, screenHeight, dpiScale` |
-| `LOCAL_DRAG_START` | `hwnd, browser, url, title, tabCount` (only sent when `tabCount == 1` and a URL was read) |
+| `LOCAL_DRAG_START` | `hwnd, browser, url, title, tabCount` (sent when `tabCount >= 1` and the selected tab's URL was read; preserves the actual tab count) |
 | `LOCAL_WINDOW_PREVIEW` (binary) | header `hwnd, mime, width, height` |
 | `LOCAL_DRAG_MOVE` | `hwnd, edge, protrusionPx, centerRatio, width, height, cursorX, cursorY, cursorAtEdge` (`edge` is null outside the 120 px zones) |
 | `LOCAL_DRAG_END` | `hwnd, edge, cursorAtEdge, velocity` |

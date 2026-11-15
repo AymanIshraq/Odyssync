@@ -47,8 +47,15 @@ class DragTests(unittest.TestCase):
         self.assertTrue(events[-1]["cursorAtEdge"])
         self.assertIsNone(tracker.qualify(generation, info))
 
-    def test_multitab_or_missing_url_never_starts(self):
-        for count, url in [(2, "https://example.com"), (0, "https://example.com"), (1, "")]:
+    def test_multitab_qualifies_selected_url_and_keeps_real_count(self):
+        tracker, generation = self.begin()
+        result = tracker.qualify(generation, {"hwnd": 10, "url": "https://selected.example", "tabCount": 5})
+        self.assertEqual(result["url"], "https://selected.example")
+        self.assertEqual(result["tabCount"], 5)
+
+    def test_invalid_count_or_missing_url_never_starts(self):
+        for count, url in [(0, "https://example.com"), (-1, "https://example.com"),
+                           (True, "https://example.com"), (None, "https://example.com"), (1, ""), (5, "")]:
             tracker, generation = self.begin()
             self.assertIsNone(tracker.qualify(generation, {"hwnd": 10, "url": url, "tabCount": count}))
 

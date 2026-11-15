@@ -100,7 +100,9 @@ function createHandoff(ctx) {
   function onDragStart(msg) {
     if (drag && drag.transfer) cancelOutgoing(drag.transfer); // the old drag never ended
     drag = null;
-    if (msg.tabCount !== 1 || !msg.url) return; // several tabs, or no URL: ignore the whole drag (E4.9)
+    // User-approved behavior: send the selected URL, then close the entire
+    // source window (including its other tabs) only after successful receipt.
+    if (!Number.isInteger(msg.tabCount) || msg.tabCount < 1 || !msg.url) return;
     drag = { hwnd: msg.hwnd, browser: msg.browser, url: msg.url, title: msg.title, preview: null, transfer: null };
   }
 

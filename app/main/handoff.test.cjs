@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHandoff } = require('./handoff');
 
-function sender({ hideSucceeds = true, acknowledge = true } = {}) {
+function sender({ hideSucceeds = true, acknowledge = true, tabCount = 1, reply = 'TRANSFER_ACCEPTED' } = {}) {
   const native = [], messages = [];
   let onSidecar;
   const state = {
@@ -23,13 +23,13 @@ function sender({ hideSucceeds = true, acknowledge = true } = {}) {
       messages.push(message);
       if (message.type === 'TRANSFER_COMMIT' && acknowledge) {
         assert.equal(native[0].type, 'HIDE_WINDOW', 'sender must hide before committing');
-        handoff.onPeerMessage({ type: 'TRANSFER_ACCEPTED', fromId: 'receiver', transferId: message.transferId });
+        handoff.onPeerMessage({ type: reply, fromId: 'receiver', transferId: message.transferId });
       }
     },
   };
   handoff = createHandoff({ transport, bridge, getState: () => state, timeouts: { reply: 10 } });
   function drop() {
-    onSidecar({ type: 'LOCAL_DRAG_START', hwnd: 10, browser: 'chrome', url: 'https://example.com', tabCount: 1 });
+    onSidecar({ type: 'LOCAL_DRAG_START', hwnd: 10, browser: 'chrome', url: 'https://example.com', tabCount });
     onSidecar({ type: 'LOCAL_DRAG_MOVE', hwnd: 10, edge: 'RIGHT', width: 900, height: 650,
       protrusionPx: 50, centerRatio: .5, cursorAtEdge: true });
     onSidecar({ type: 'LOCAL_DRAG_END', hwnd: 10, edge: 'RIGHT', cursorAtEdge: true });
@@ -56,6 +56,30 @@ test('an unconfirmed delivery restores the original rather than discarding it', 
   const s = sender({ acknowledge: false });
   s.drop();
   assert.equal(s.native[0].type, 'HIDE_WINDOW');
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepEqual(s.native.map(message => message.type), ['HIDE_WINDOW', 'SHOW_WINDOW']);
+});
+
+test('five-tab source sends exactly the selected URL and closes its entire window after acceptance', () => {
+  const s = sender({ tabCount: 5 });
+  s.drop();
+  const commits = s.messages.filter(message => message.type === 'TRANSFER_COMMIT');
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].url, 'https://example.com');
+  assert.deepEqual(s.native, [{ type: 'HIDE_WINDOW', hwnd: 10 }, { type: 'CLOSE_WINDOW', hwnd: 10 }]);
+});
+
+for (const reply of ['TRANSFER_REJECTED', 'TRANSFER_FAILED']) {
+  test(`five-tab source restores its entire window on ${reply}`, () => {
+    const s = sender({ tabCount: 5, reply });
+    s.drop();
+    assert.deepEqual(s.native.map(message => message.type), ['HIDE_WINDOW', 'SHOW_WINDOW']);
+  });
+}
+
+test('five-tab source restores its entire window when delivery times out', async () => {
+  const s = sender({ tabCount: 5, acknowledge: false });
+  s.drop();
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.deepEqual(s.native.map(message => message.type), ['HIDE_WINDOW', 'SHOW_WINDOW']);
 });

@@ -144,8 +144,7 @@ def read_browser_tab(hwnd: int) -> dict:
                 edits.append(control)
             children = control.GetChildren()
             if depth >= 14 and children:
-                # Silently truncating the tree could turn a multi-tab window
-                # into an apparent single-tab window and authorize its closure.
+                # Reject incomplete inspection rather than guessing browser state.
                 raise ValueError("Browser tab count is incomplete: UI Automation depth limit reached")
             stack.extend((child, depth + 1) for child in reversed(children))
         named = [edit for edit in edits if any(word in edit.Name.lower()
@@ -165,9 +164,9 @@ def read_browser_tab(hwnd: int) -> dict:
         # A readable, genuinely empty omnibox plus a native new-tab document
         # works across languages and decorated tab labels. A failed URL read
         # or unfinished search must not turn an ordinary page into a blank tab.
-        if not url and len(tabs) == 1 and address_values and not any(address_values):
-            native_new_tab = any(is_new_tab_url(value) for value in document_urls)
-            legacy_new_tab = (not document_urls and
+        if not url and tabs and address_values and not any(address_values):
+            native_new_tab = len(document_urls) == 1 and is_new_tab_url(document_urls[0])
+            legacy_new_tab = (len(tabs) == 1 and not document_urls and
                               tabs[0].Name.strip().lower() in ("new tab", "new tab page"))
             if native_new_tab or legacy_new_tab:
                 url = new_tab_url(browser)

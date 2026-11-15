@@ -58,9 +58,14 @@ class NewTabInspectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.read(document="https://example.com")
 
-    def test_multitab_window_is_not_qualified_as_a_single_blank_tab(self):
+    def test_selected_blank_tab_in_multitab_window_keeps_actual_count(self):
+        result = self.read(count=5)
+        self.assertEqual(result["url"], "chrome://newtab/")
+        self.assertEqual(result["tabCount"], 5)
+
+    def test_multitab_blank_address_without_native_document_is_not_guessed(self):
         with self.assertRaises(ValueError):
-            self.read(count=2)
+            self.read(count=5, document=None)
 
     def test_real_url_still_wins_over_new_tab_document(self):
         self.assertEqual(self.read(value="youtube.com")["url"], "https://youtube.com")
@@ -69,6 +74,7 @@ class NewTabInspectionTests(unittest.TestCase):
 class NewTabReceiverTests(unittest.TestCase):
     def test_missing_sender_browser_uses_an_installed_browser_for_blank_tab(self):
         controller = WindowController()
+        controller.gui = Mock()
         controller.window_handles = Mock(return_value={1})
         controller.browser_windows = Mock(return_value={2: "msedge"})
         controller.place = Mock()

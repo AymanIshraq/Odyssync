@@ -1,7 +1,7 @@
 # Windows executable builds
 
-End users can run `Odyssync-0.1.3-portable.exe` directly, or use
-`Odyssync-0.1.3-setup.exe` for a per-user installation and shortcuts.
+End users can run `Odyssync-0.1.4-portable.exe` directly, or use
+`Odyssync-0.1.4-setup.exe` for a per-user installation and shortcuts.
 Both contain Electron, Node, Python and the Windows helper's dependencies.
 Chrome, Edge or Brave must already be installed. The existing relay URL is
 included from `app/config.json`; no cloud service is installed on the laptop.
