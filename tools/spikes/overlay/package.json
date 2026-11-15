@@ -1,0 +1,15 @@
+{
+  "name": "odyssync-overlay-spike",
+  "version": "0.0.0",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.cjs && node --check renderer.js && node --check preload-replay.cjs && node --check replay.cjs && node --check ../../../app/overlay/ghosts.js && node --check ../../../app/overlay/bezel.js && node --check ../../../app/overlay/approval.js && node --check ../../../app/overlay/voice.js && node --check ../../../app/overlay/renderer.js",
+    "ghost": "electron . --ghost-replay",
+    "test": "node --test ../../../app/overlay/ghosts.test.cjs ../../../app/overlay/bezel.test.cjs ../../../app/overlay/approval.test.cjs ../../../app/overlay/remaining.test.cjs"
+  },
+  "devDependencies": {
+    "electron": "45.3.2"
+  }
+}
