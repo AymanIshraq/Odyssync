@@ -1,0 +1,16 @@
+{
+  "name": "odyssync",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main/index.js",
+  "scripts": {
+    "start": "electron .",
+    "server": "node server/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.23.0"
+  },
+  "devDependencies": {
+    "electron": "^45.3.2"
+  }
+}

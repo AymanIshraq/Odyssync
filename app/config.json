@@ -1,0 +1,6 @@
+{
+  "relayUrl": "wss://REPLACE-ME.up.railway.app",
+  "localPort": 8080,
+  "elevenLabsAgentId": "",
+  "picovoiceAccessKey": ""
+}

@@ -1,8 +1,8 @@
 # Odyssync — Progress
 
-Last updated: 2026-11-14
+Last updated: 2026-11-15
 
-**Overall: 0% built. 100% left.** Four people (two tech, two UI); 16 hours remained when planning began.
+**Overall: about 23% built. About 77% left.** Four people (two tech, two UI); 16 hours remained when planning began.
 
 Percentages are each component's share of all the work. Every tier is in scope.
 
@@ -20,12 +20,12 @@ Percentages are each component's share of all the work. Every tier is in scope.
 | # | Component | Track | Share | Done |
 |---|---|---|---|---|
 | 0 | Spikes: URL read, overlay click-through | T1, U2 | 3% | 0% |
-| 1 | App shell and sidecar bridge | T2 | 5% | 0% |
-| 2 | Room server, join, message forwarding | T2 | 8% | 0% |
-| 3 | Layout canvas and neighbour map | U1, T2 | 8% | 0% |
+| 1 | App shell and sidecar bridge | T2 | 5% | 90% (shell, preloads, replay tool and full bridge done and tested with a pretend sidecar; starting the real Python helper on Windows is untested) |
+| 2 | Room server, join, message forwarding | T2 | 8% | 90% (`server.js`, `transport.js` and `room.js` create/join/leave done and tested with pretend laptops and in the app on a Mac; not yet run on Windows laptops or through Railway) |
+| 3 | Layout canvas and neighbour map | U1, T2 | 8% | 45% (T2 half done: host layout, auto-placement, neighbour maths, broadcast; UI 1's canvas left) |
 | 4 | Sender: drag detection, URL, snapshot, streaming | T1 | 10% | 0% |
 | 5 | Overlay: ghost rendering in lockstep | U2 | 8% | 0% |
-| 6 | Commit, receive, place, confirm, failure path | T1, T2 | 8% | 0% |
+| 6 | Commit, receive, place, confirm, failure path | T1, T2 | 8% | 45% (T2 half done: sender and receiver rules for all three modes in `handoff.js`, tested with pretend sidecars and overlays; Tech 1's sidecar half and a real Windows test left) |
 | 7 | Four-edge and four-laptop integration | all | 5% | 0% |
 
 ## Tier 2 — impressive (15%)
@@ -33,7 +33,7 @@ Percentages are each component's share of all the work. Every tier is in scope.
 | # | Component | Track | Share | Done |
 |---|---|---|---|---|
 | 8 | Bezel glow | U2 | 3% | 0% |
-| 9 | Modes: broadcast, switcher, hotkeys | U1, T2 | 3% | 0% |
+| 9 | Modes: broadcast, switcher, hotkeys | U1, T2 | 3% | 40% (mode broadcast done; switcher and hotkeys left) |
 | 10 | Focus bounce | U2, T1 | 3% | 0% |
 | 11 | Approval prompt | U2 | 4% | 0% |
 | 12 | Canvas animations | U1 | 2% | 0% |
@@ -44,14 +44,14 @@ Percentages are each component's share of all the work. Every tier is in scope.
 |---|---|---|---|---|
 | 13 | File drag and drop, transfer, file card | T1, T2, U2 | 6% | 0% |
 | 14 | Direct send: target pills and "Send to" | U2, U1 | 4% | 0% |
-| 15 | Kick | T2, U1 | 2% | 0% |
+| 15 | Kick | T2, U1 | 2% | 60% (server and app side done; UI 1's button left) |
 | 16 | Roster with ping, mode and transport badges | U1 | 2% | 0% |
 
 ## Tier 4 — remote collaboration (10%), relay starts in the first block
 
 | # | Component | Track | Share | Done |
 |---|---|---|---|---|
-| 17 | Cloud relay deployed, room-number join | T2, U1 | 5% | 0% |
+| 17 | Cloud relay deployed, room-number join | T2, U1 | 5% | 40% (room-number join works against a relay on the same machine; Railway deploy and UI left) |
 | 18 | Local upgrade race and failover | T2 | 5% | 0% |
 
 ## Voice assistant (6%), added 2026-11-14
