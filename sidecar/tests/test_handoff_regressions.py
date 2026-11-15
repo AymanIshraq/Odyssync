@@ -76,7 +76,7 @@ class WindowRecoveryTests(unittest.TestCase):
         controller = self.controller()
         controller.hidden[10] = (-20, 100, 780, 700)
         controller.gui.IsWindow.return_value = True
-        with patch("sidecar.handoff.time.monotonic", side_effect=[0, 1]):
+        with patch("sidecar.handoff.time.monotonic", side_effect=[0, 3]):
             controller.close(10)
         controller.gui.PostMessage.assert_called_once_with(10, 0x10, 0, 0)
         controller.gui.ShowWindow.assert_called_once_with(10, 4)
@@ -98,12 +98,22 @@ class WindowRecoveryTests(unittest.TestCase):
         self.assertNotIn(10, controller.hidden)
         controller.gui.ShowWindow.assert_not_called()
 
+    def test_slow_successful_close_does_not_flash_sender_back_after_half_second(self):
+        controller = self.controller()
+        controller.hidden[10] = (0, 0, 800, 600)
+        controller.gui.IsWindow.side_effect = [True, False]
+        with patch("sidecar.handoff.time.monotonic", side_effect=[0, 0.75]), \
+                patch("sidecar.handoff.time.sleep"):
+            controller.close(10)
+        controller.gui.ShowWindow.assert_not_called()
+        self.assertNotIn(10, controller.hidden)
+
     def test_failed_restore_keeps_window_tracked_for_disconnect_retry(self):
         controller = self.controller()
         controller.hidden[10] = (0, 0, 800, 600)
         controller.gui.IsWindow.return_value = True
         controller.gui.ShowWindow.side_effect = OSError("Temporary restore failure")
-        with patch("sidecar.handoff.time.monotonic", side_effect=[0, 1]), self.assertRaises(OSError):
+        with patch("sidecar.handoff.time.monotonic", side_effect=[0, 3]), self.assertRaises(OSError):
             controller.close(10)
         self.assertIn(10, controller.hidden)
         controller.gui.ShowWindow.side_effect = None

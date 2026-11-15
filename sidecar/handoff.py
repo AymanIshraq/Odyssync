@@ -134,15 +134,15 @@ class WindowController:
             self.gui.PostMessage(hwnd, 0x0010, 0, 0)  # WM_CLOSE; browser can veto
             if hwnd not in self.hidden:
                 return
-            # Posting is not confirmation. Give an ordinary close time to finish
-            # without flashing the source back on screen. A veto or slow close
-            # must leave the source visible, including any confirmation dialog.
-            deadline = time.monotonic() + 0.5
-            while self.gui.IsWindow(hwnd):
-                if time.monotonic() >= deadline:
-                    self.show(hwnd)  # Failed restoration retains recovery tracking.
-                    return
-                time.sleep(0.025)
+        # Slow successful closes must stay hidden. Do not hold the controller
+        # lock while waiting: a different window may need to hide immediately.
+        deadline = time.monotonic() + 2.0
+        while self.gui.IsWindow(hwnd):
+            if time.monotonic() >= deadline:
+                self.show(hwnd)  # A real browser veto still needs a visible recovery path.
+                return
+            time.sleep(0.025)
+        with self.lock:
             self.hidden.pop(hwnd, None)
 
     def bounce(self, hwnd, edge, stopped):
@@ -230,8 +230,13 @@ class WindowController:
             url = new_tab_url(target_browser)
         if stopped.is_set():
             raise RuntimeError("Bridge disconnected before browser launch")
+        remaining = 4.0
+        if "expiresAt" in message:
+            remaining = min(remaining, (message["expiresAt"] - time.time() * 1000) / 1000)
+            if remaining <= 0:
+                raise TimeoutError("Open command expired in the queue; no browser was launched")
         self.launch(url, executable)
-        deadline = time.monotonic() + 4
+        deadline = time.monotonic() + remaining
         while time.monotonic() < deadline and not stopped.is_set():
             candidates = {hwnd: browser for hwnd, browser in self.browser_windows().items()
                           if hwnd not in before and (not executable or browser == target_browser)}

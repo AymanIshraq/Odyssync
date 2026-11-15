@@ -154,11 +154,7 @@ function createHandoff(ctx) {
     }
     // Rule 4: hide (not close) our window and ask the receiver to open the tab.
     const { centerRatio, width, height } = t.lastMove;
-    bridge.send({ type: 'HIDE_WINDOW', hwnd: t.hwnd });
-    transport.sendToPeer(t.target, {
-      type: 'TRANSFER_COMMIT', transferId: t.id, kind: 'tab', edge: t.edge, centerRatio, width, height,
-      url: t.url, title: t.title, browser: t.browser, direct: false,
-    });
+    if (!bridge.send({ type: 'HIDE_WINDOW', hwnd: t.hwnd })) return cancelOutgoing(t);
     show('COMMIT', 'sender', t.edge, t.id, {
       kind: 'tab', title: t.title, url: t.url, filename: null, size: null,
       fromName: myProfile().displayName, mode: modeOf(selfId()), direct: false,
@@ -167,6 +163,11 @@ function createHandoff(ctx) {
     // The return-the-tab timer: no answer in time -> the window comes back.
     const ms = receiverMode === 'approval' ? times.replyApproval : times.reply;
     t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), ms);
+    // Register the transfer and timeout before a fast receiver can acknowledge.
+    transport.sendToPeer(t.target, {
+      type: 'TRANSFER_COMMIT', transferId: t.id, kind: 'tab', edge: t.edge, centerRatio, width, height,
+      url: t.url, title: t.title, browser: t.browser, direct: false,
+    });
   }
 
   // A waiting transfer is over: close our window (accepted) or bring it back.
@@ -248,6 +249,7 @@ function createHandoff(ctx) {
     const rect = clampRect(r.rect || computedRect(r));
     const sent = bridge.send({
       type: 'OPEN_URL', transferId: r.id, url: r.commit.url, browser: r.commit.browser,
+      expiresAt: Date.now() + Math.max(1, times.open - 200),
       x: toPx(rect.x), y: toPx(rect.y), width: toPx(rect.width), height: toPx(rect.height),
     });
     if (!sent) return endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'no sidecar' });

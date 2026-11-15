@@ -85,13 +85,17 @@ Results from ended drags are discarded. Native capture calls can hang in a
 broken application; the bounded worker keeps polling responsive, but a
 persistently stuck capture requires restarting the sidecar.
 
-Window commands execute serially on a separate worker:
+Open, close and bounce commands execute serially on a native worker. Hide/show
+use a separate ordered visibility worker, so starting an incoming browser
+cannot delay hiding an outgoing sender. Disconnect cleanup drains visibility
+work before restoring hidden windows. Queued opens expire before launching if
+Electron's receiver deadline has already passed.
 
 - `HIDE_WINDOW`: remembers the sender's rectangle and hides the window.
 - `SHOW_WINDOW`: shows it and clamps its rectangle to the primary work area.
 - `CLOSE_WINDOW`: posts `WM_CLOSE`, only when explicitly commanded by Electron.
   A tracked hidden source stays in recovery tracking until destruction is
-  observed. If it still exists after a 500 ms grace period, it is shown again
+  observed. If it still exists after a two-second grace period, it is shown again
   in the work area so a refused or slow close cannot abandon it while hidden.
   A failed restore retains tracking for retry on bridge disconnect.
 - `OPEN_URL`: finds the requested browser in registry App Paths, launches
