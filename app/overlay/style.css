@@ -1,0 +1,21 @@
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; pointer-events: none; }
+.ghost { position: absolute; left: 0; top: 0; overflow: hidden; border-radius: 12px; background: #07172f; outline: 1px solid #155cf4; will-change: transform, opacity; }
+.ghost img { width: 100%; height: 100%; object-fit: fill; }
+[hidden] { display: none !important; }
+.bezel { position: absolute; left: 0; top: 0; z-index: 1; pointer-events: none; border-radius: 7px; background: currentColor; box-shadow: 0 0 14px 5px currentColor; opacity: .8; will-change: transform; }
+.approval { position: absolute; top: 0; left: 0; z-index: 3; box-sizing: border-box; padding: 12px; border: 2px solid #ffb347; border-radius: 12px; background: #07172f; color: #f2f6ff; font: 14px/1.3 'Manrope', system-ui, sans-serif; pointer-events: auto; animation: approval-pulse 1.4s ease-in-out infinite; overflow: auto; }
+.approval-heading, .approval-title, .approval-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.approval-heading { font-size: 12px; color: #ffb347; }
+.approval-title { font-weight: 600; margin-top: 4px; }
+.approval-url { font-size: 12px; color: #a6b5cb; margin-top: 3px; }
+.approval-actions { display: flex; gap: 8px; margin-top: 8px; }
+.approval button { min-height: 36px; flex: 1; border: 1px solid #a6b5cb; border-radius: 6px; background: #07172f; color: #f2f6ff; font: inherit; cursor: pointer; }
+.approval button:first-child { background: #155cf4; border-color: #155cf4; }
+.approval button:hover { filter: brightness(1.2); }
+.approval button:focus-visible { outline: 2px solid #c9fa19; outline-offset: 2px; }
+@keyframes approval-pulse { 50% { box-shadow: 0 0 16px #ffb34780; } }
+@media (prefers-reduced-motion: reduce) { .approval { animation: none; } }
+.voice-indicator { position: absolute; right: 24px; bottom: 24px; padding: 10px 16px; border: 1px solid #155cf4; border-radius: 24px; color: #f2f6ff; background: #07172f; font: 14px system-ui, sans-serif; pointer-events: none; }
+.voice-indicator[data-state="listening"] { border-color: #c9fa19; }
+.voice-indicator[data-state="thinking"] { border-color: #ff7618; }
+.ghost-caption { box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; padding: 24px; height: 100%; color: #f2f6ff; font: 16px/1.6 system-ui, sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; overflow: hidden; }

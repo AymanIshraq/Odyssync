@@ -17,6 +17,13 @@ Percentages are each component's share of all the work. Every tier is in scope.
 
 ## Tier 1 — core (55%)
 
+UI 2 local implementation: the isolated moving-box spike and Item 1 ghost
+renderer are present. The ghost replay runs through the spike's optional
+`--ghost-replay` harness; shared main/preload and `tools/replay.js` are still
+absent. Four automated renderer tests and syntax checks pass. Native desktop,
+real handoff, and two-laptop/DPI acceptance remain unverified, so completion
+percentages below remain at 0% accepted (100% acceptance work remains).
+
 | # | Component | Track | Share | Done |
 |---|---|---|---|---|
 | 0 | Spikes: URL read, overlay click-through | T1, U2 | 3% | 0% |
