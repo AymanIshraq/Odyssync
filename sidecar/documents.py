@@ -17,13 +17,17 @@ from sidecar.windows import browser_for_window, process_exe, read_browser_tab, w
 
 log = logging.getLogger(__name__)
 
-# Our own Electron app. A packaged build has a different exe name: add it here.
-NOT_DOCUMENT_APPS = frozenset({"electron.exe", "explorer.exe"})
+# Our own app (development and packaged names), plus the Explorer file-drop path.
+NOT_DOCUMENT_APPS = frozenset({"electron.exe", "odyssync.exe", "explorer.exe"})
 OFFICE_APPS = {"winword.exe": "Word.Application", "excel.exe": "Excel.Application",
                "powerpnt.exe": "PowerPoint.Application"}
 # Editors whose window title starts with the active file's full path (README:
 # the one-time "window.title" setting). Value: the exe under its install folder.
 EDITOR_APPS = {"code.exe": "Microsoft VS Code\\Code.exe", "cursor.exe": "cursor\\Cursor.exe"}
+
+
+class DocumentReadError(ValueError):
+    """An actionable, path-free error for a supported document application."""
 
 
 def is_regular_file(path) -> bool:
@@ -180,7 +184,10 @@ def office_window_path(app: str, office, hwnd: int, root, is_file) -> str:
             raise ValueError("Office window has no handle property")
         handle = int(handle) & 0xFFFFFFFF
         if same_handle(handle, hwnd) or same_handle(root(handle), hwnd):
-            names.append(document(window).FullName)
+            current = document(window)
+            if getattr(current, "Saved", True) is False:
+                raise ValueError("Save the active Office document before swiping it")
+            names.append(current.FullName)
     if len(names) != 1:
         raise ValueError("Office has no single document window for this handle")
     return office_path(names[0], is_file)
@@ -225,10 +232,47 @@ def office_document(app: str, hwnd: int) -> str:
     pythoncom.CoInitialize()
     try:
         # The Application object is released when this call returns, before uninitialising.
-        return office_window_path(app, GetActiveObject(OFFICE_APPS[app]), hwnd, window_root,
-                                  is_regular_file)
+        # Bind to THIS window first. GetActiveObject alone can point to a
+        # different Office instance, or fail before Office registers in the ROT.
+        try:
+            return native_office_path(app, hwnd)
+        except ValueError:
+            raise
+        except Exception:
+            return office_window_path(app, GetActiveObject(OFFICE_APPS[app]), hwnd, window_root,
+                                      is_regular_file)
     finally:
         pythoncom.CoUninitialize()
+
+
+def native_office_path(app, hwnd):
+    """Use Office's documented OBJID_NATIVEOM interface on the dragged window.
+
+    https://learn.microsoft.com/windows/win32/api/oleacc/nf-oleacc-accessibleobjectfromwindow
+    COM references remain on the qualification worker and are released here.
+    """
+    import win32gui
+    from comtypes import GUID
+    from comtypes.automation import IDispatch
+    from comtypes.client.dynamic import Dispatch
+
+    class_name = {"winword.exe": "_WwG", "excel.exe": "EXCEL7", "powerpnt.exe": "paneClassDC"}[app]
+    children = []
+    win32gui.EnumChildWindows(hwnd, lambda child, _: children.append(child)
+                             if win32gui.GetClassName(child) == class_name else None, None)
+    if not children:
+        raise RuntimeError("Office native window is unavailable")
+    accessible = ctypes.WinDLL("oleacc").AccessibleObjectFromWindow
+    accessible.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.POINTER(GUID),
+                          ctypes.POINTER(ctypes.POINTER(IDispatch))]
+    accessible.restype = ctypes.c_long
+    for child in children:
+        pointer = ctypes.POINTER(IDispatch)()
+        if accessible(child, 0xFFFFFFF0, ctypes.byref(IDispatch._iid_), ctypes.byref(pointer)) != 0:
+            continue
+        window = Dispatch(pointer)
+        return office_window_path(app, window.Application, hwnd, window_root, is_regular_file)
+    raise RuntimeError("Office native document is unavailable")
 
 
 def read_window_document(hwnd: int) -> dict:
@@ -242,21 +286,36 @@ def read_window_document(hwnd: int) -> dict:
         app = process_exe(handle)
         if app in NOT_DOCUMENT_APPS:
             raise ValueError("Window belongs to a program that never shows a document")
-        command_line = ("" if app in OFFICE_APPS or app in EDITOR_APPS
+        command_line = ("" if app in OFFICE_APPS or app in EDITOR_APPS or app == "notepad.exe"
                         else process_command_line(handle))
     finally:
         handle.Close()
-    if app in OFFICE_APPS:
-        path = office_document(app, hwnd)
-    elif app in EDITOR_APPS:
-        path = editor_title_path(title, is_regular_file)
-    else:
-        path = choose_document(split_command_line(command_line), title, is_regular_file)
+    keep_source = False
+    try:
+        if app in OFFICE_APPS:
+            path = office_document(app, hwnd)
+        elif app in EDITOR_APPS:
+            if title.startswith("\u25cf "):
+                raise ValueError("Save the active editor file before swiping it")
+            path = editor_title_path(title, is_regular_file)
+        elif app == "notepad.exe":
+            from sidecar.notepad import notepad_document
+            path, tabs = notepad_document(hwnd, title)
+            # Never close other documents in a tabbed Notepad window.
+            keep_source = tabs > 1
+        else:
+            path = choose_document(split_command_line(command_line), title, is_regular_file)
+    except Exception as error:
+        if app in OFFICE_APPS or app in EDITOR_APPS or app == "notepad.exe":
+            message = str(error) if isinstance(error, ValueError) else "Could not read this document. Save it locally and try again."
+            raise DocumentReadError(message) from None
+        raise
     if not is_regular_file(path):
         raise ValueError("Document file does not exist")
     log.info("Document qualification: %.1f ms, app=%s",
              (time.monotonic() - started) * 1000, app)
-    return {"hwnd": hwnd, "kind": "document", "path": path, "title": title, "app": app}
+    return {"hwnd": hwnd, "kind": "document", "path": path, "title": title, "app": app,
+            **({"keepSource": True} if keep_source else {})}
 
 
 def read_dragged_window(hwnd: int) -> dict:

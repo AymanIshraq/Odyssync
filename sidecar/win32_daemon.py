@@ -13,10 +13,11 @@ import threading
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sidecar.documents import read_dragged_window
+from sidecar.documents import DocumentReadError, read_dragged_window
 from sidecar.drag import DragTracker, FileDragTracker
 from sidecar.handoff import WindowController
 from sidecar.lookups import lookup_reply
+from sidecar.notepad import clear_snapshots
 from sidecar.preview import capture_preview
 from sidecar.windows import WindowsDesktop, enable_dpi_awareness, warm_browser_worker
 
@@ -170,11 +171,14 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None, documents
     files = FileDragTracker()
     pending = None
     pending_generation = None
+    requested = None
     preview_pending = None
     preview_generation = None
     cache_generation = None
     preview_data = None
     preview_edge = None
+    release_sample = None
+    release_deadline = 0
     loop = asyncio.get_running_loop()
     try:
         while True:
@@ -184,8 +188,47 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None, documents
                 info = desktop.screen_info()
                 for event in files.update(sample, (info["screenWidth"], info["screenHeight"]), active):
                     outbox.put(event)
-                events, request = tracker.update(
-                    sample, (info["screenWidth"], info["screenHeight"]), active)
+                if release_sample is not None and (sample.pressed or sample.hwnd != release_sample.hwnd):
+                    # A new gesture/focus change revokes a deferred release.
+                    tracker.reset()
+                    release_sample = None
+                # Consume qualification BEFORE mouse-up resets the generation.
+                if pending is not None and pending.done():
+                    try:
+                        start = tracker.qualify(pending_generation, pending.result())
+                        if start:
+                            if start.get("kind") == "document" and documents is not None:
+                                documents.add(start["hwnd"])
+                            outbox.put(start)
+                    except Exception as error:
+                        log.info("Window qualification failed: %s", error)
+                        if isinstance(error, DocumentReadError) and pending_generation == tracker.generation:
+                            start = tracker.qualify(pending_generation, {"hwnd": tracker.hwnd,
+                                                    "kind": "document", "error": str(error)})
+                            if start:
+                                outbox.put(start)
+                    pending = None
+                qualifying = ((pending is not None and pending_generation == tracker.generation)
+                              or (requested is not None and requested[0] == tracker.generation))
+                if (release_sample is None and tracker.hwnd == sample.hwnd and not sample.pressed
+                        and not tracker.started and qualifying):
+                    # Office may finish a COM read only when its native move loop
+                    # ends. Retain the exact release position, never a later cursor.
+                    release_sample = sample
+                    release_deadline = loop.time() + 2
+                if release_sample is not None and qualifying and not tracker.started and loop.time() < release_deadline:
+                    events, request = [], None
+                else:
+                    if release_sample is not None and qualifying and not tracker.started:
+                        start = tracker.qualify(tracker.generation, {"hwnd": tracker.hwnd, "kind": "document",
+                                                "error": "Reading this window took too long. Please try the swipe again."})
+                        if start:
+                            outbox.put(start)
+                    events, request = tracker.update(
+                        release_sample or sample, (info["screenWidth"], info["screenHeight"]), active)
+                    release_sample = None
+                if request:
+                    requested = request
                 if cache_generation != tracker.generation:
                     cache_generation = tracker.generation
                     preview_data = None
@@ -210,23 +253,13 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None, documents
                             preview_pending = previews.submit(event["hwnd"])
                             preview_generation = tracker.generation
                     outbox.put(event)
-                # Never stack UIA reads behind a blocked browser. A stale read
-                # finishes in its worker but cannot qualify a later drag.
-                if pending is not None and pending.done():
-                    try:
-                        start = tracker.qualify(pending_generation, pending.result())
-                        if start:
-                            if start.get("kind") == "document" and documents is not None:
-                                # Lets Electron's window commands act on this handle.
-                                documents.add(start["hwnd"])
-                            outbox.put(start)
-                    except Exception as error:
-                        # Expected for most ordinary window moves; no traceback noise.
-                        log.info("Window qualification failed; ignoring drag: %s", error)
-                    pending = None
-                if request and pending is None:
-                    pending_generation, hwnd = request
+                if requested and requested[0] != tracker.generation:
+                    requested = None
+                if requested and pending is None:
+                    pending_generation, hwnd = requested
                     pending = reader.submit(hwnd)
+                    if pending is not None:
+                        requested = None
             except asyncio.QueueFull:
                 raise RuntimeError("Bridge stalled; resetting drag session") from None
             except Exception:
@@ -235,6 +268,8 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None, documents
                     outbox.put({"type": "LOCAL_DRAG_END", "hwnd": tracker.hwnd,
                                 "edge": None, "cursorAtEdge": False, "velocity": 0.0})
                 tracker.reset()
+                release_sample = None
+                requested = None
                 if files.edge is not None:
                     outbox.put({"type": "LOCAL_FILE_DRAG", "active": False, "edge": files.edge})
                     files.edge = None
@@ -275,6 +310,7 @@ async def run_session(socket, desktop, reader, controller=None, previews=None, l
         # Ordered after any in-flight command so a delayed hide cannot escape
         # restoration. A disconnect is never permission to close the original.
         await asyncio.get_running_loop().run_in_executor(commands, controller.restore_hidden)
+        clear_snapshots()
         commands.shutdown(wait=False, cancel_futures=True)
         if own_previews:
             previews.close()

@@ -141,37 +141,53 @@ window during this check, because identification uses handle differences.
 The test can also use `--browser chrome` or `--browser msedge`.
 Add `--section3` to verify tab lookup and four native bounce animations too.
 
-## Document drags and `OPEN_FILE` (not yet run on Windows)
+## Document drags and `OPEN_FILE`
 
-None of this has been run on Windows yet; only the pure rules are tested.
+Native capture and reopening have been tested on this Windows laptop for Notepad,
+Word, Excel and VS Code. Two physical laptops still need an acceptance test.
+Run `.venv\Scripts\python.exe tools/spikes/document_smoke.py` from the repo root
+to repeat the native checks using disposable files and windows. The Python
+regression tests and `node --test app/main/handoff.test.cjs` cover lifecycle,
+message/byte transfer, approval, failure recovery and source preservation.
 
 Any ordinary window can now start a drag, not only browsers. Shell, Explorer,
 dialog and console windows are excluded. The qualification worker checks the
 window's process: Chrome, Edge and Brave use the browser tab read. A local
 file open in a browser now gives a `file:///C:/...` URL with spaces encoded.
-Word, Excel and PowerPoint are asked through COM which saved file belongs to
-that window. Any other program qualifies only if it was started with exactly
+Word, Excel and PowerPoint are asked through their window's native COM interface
+which saved file belongs to that window, with the running-object table as a
+fallback. This works with separate Office instances. Save pending edits first;
+the sidecar never silently sends an older disk version or saves over your file.
+Notepad supplies its complete active text through UI Automation, including
+unsaved text, as a temporary UTF-8 plain-text file with Windows line endings.
+No clipboard use, tab switching or keyboard shortcuts are needed. Temporary
+snapshots older than five minutes are pruned on the next capture; disconnecting
+the helper also clears its captured copies.
+A Notepad window with other tabs stays on the sender to preserve those documents.
+Any other program qualifies only if it was started with exactly
 one existing file on its command line, and its title shows that file's name.
 A document then sends `LOCAL_DRAG_START {hwnd, kind: "document", path, title, app}`.
 The other drag messages are unchanged.
 
 Window commands accept a document window only if this sidecar qualified it
-as a document drag, or hid it. `OPEN_FILE {transferId, path, x, y, width, height}`
-opens the file with its default program. It waits up to 4 seconds for a new
-window that names the file, and places it like `OPEN_URL`. A program that
+as a document drag, or hid it. `OPEN_FILE {transferId, path, app?, expiresAt?, x, y, width, height}`
+opens the file in the named supported application (otherwise its default program).
+It waits up to 20 seconds for a window that names the file, and places new windows
+like `OPEN_URL`. Named app launches match only windows of that application, not
+an unrelated window or startup splash. A program that
 reuses an existing window instead (for example a new tab) is reported but not
-moved. A new window that never names the file is accepted after 1.5 seconds,
-if it is the only one. Replies are `WINDOW_PLACED` or `OPEN_FAILED`.
+moved. Replies are `WINDOW_PLACED` or `OPEN_FAILED`. The received file stays in
+Downloads/Odyssync on open failure; the sender is restored and a notice explains
+the failure. Missing applications do not count as successful auto-opens.
 
-Not supported (the drag is ignored): unsaved documents, and files opened
-with File > Open after the program started. Also files in a tab other than
-the first in tabbed or single-instance programs. Also Office files stored
-only online (OneDrive or SharePoint addresses). Office Protected View windows
-are probably not found either (not checked).
-Relative paths on a command line are ignored. Our own app is excluded only
-by the name `electron.exe`; a packaged build needs its name added in `documents.py`.
+Office documents must be saved locally; online-only addresses and Protected View
+are not supported. Generic applications still have the command-line limitation;
+Notepad, Office and configured VS Code do not. Supported-app lookup failures
+produce an explanation on an attempted edge drop rather than disappearing in
+the log. Relative command-line paths are ignored. Our own app is excluded as
+both `electron.exe` and `odyssync.exe`.
 
-### VS Code and Cursor (not yet run on Windows)
+### VS Code and Cursor (one-time title setting, no extension)
 
 VS Code shows only the file's short name in its title by default, and is
 started on a folder, so the rules above find nothing. Each user sets this
@@ -187,15 +203,16 @@ For `code.exe` and `cursor.exe` the sidecar reads the path from the title,
 never the command line, and sends `LOCAL_DRAG_START` with `app` set to that exe.
 The sender's editor window is not hidden or closed; it only bounces back.
 `OPEN_FILE` with `app: "code.exe"` or `"cursor.exe"` opens the file in a new
-window of that editor (`--new-window`); any other `app` fails (absent or
-`null` keeps the default program). If the editor is
+window of that editor (`--new-window`). Other supported document apps also have
+explicit launchers; arbitrary app names are refused. If the editor is
 not installed the reply is `OPEN_FAILED` with `editor not installed`; Electron
-then falls back to saving the file and showing it in its folder.
+shows the saved file in its folder and reports that automatic opening failed.
 The editor is found in registry App Paths, then the usual install folders.
 
-Limits: only the saved version on disk is sent, not unsaved changes. One
-file, not the project. Untitled and remote (SSH, WSL, containers) files are
-skipped. Without the setting the drag does nothing. More editors that take the
+Limits: save edits before swiping; dirty editors are refused with a notice.
+One file travels, not the project. Untitled and remote (SSH, WSL, containers)
+files are refused. Without the setting the app explains the required setting
+when the window is dropped at an occupied edge. More editors that take the
 same setting are one line in `EDITOR_APPS` in `documents.py`.
 
 ## Section 3 integration

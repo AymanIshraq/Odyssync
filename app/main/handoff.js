@@ -24,9 +24,10 @@ const DEFAULT_TIMEOUTS = {
   approval: 30000, // receiver: no Accept/Reject in 30 s -> rejected
   ghost: 500, // receiver: wait this long for the overlay's ghostSettled (its animation takes about 0.26 s)
   open: 4300, // receiver: wait for the sidecar's answer (it tries for 4 s); ghost + this stays under the sender's 5 s
-  fileReply: 70000, // sender: no answer to a file or document in 70 s -> failed (receiver: 60 s for the bytes + ghost + open)
-  fileReplyApproval: 100000, // the same, when the receiver is in approval mode (+30 s for Accept)
+  fileReply: 90000, // payload (60 s) + cold document startup (20 s) + animation/margin
+  fileReplyApproval: 120000, // plus 30 s for approval
   filePayload: 60000, // receiver: the file's bytes must arrive within 60 s of its commit
+  documentOpen: 20000, // Office and VS Code can take longer than a warm browser
 };
 const OPPOSITE = { LEFT: 'RIGHT', RIGHT: 'LEFT', TOP: 'BOTTOM', BOTTOM: 'TOP' };
 const MAX_FILE = 50 * 1024 * 1024; // FILE_PAYLOAD is at most 50 MB
@@ -37,6 +38,7 @@ const OPENABLE = new Set(['.pdf', '.txt', '.md', '.log', '.csv', '.json', '.xml'
 // itself stays here, and the neighbour opens the file in the same editor. An editor only
 // shows a file, it never runs it, so any type of file may be opened in one.
 const EDITORS = new Set(['code.exe', 'cursor.exe']);
+const DOCUMENT_APPS = new Set([...EDITORS, 'notepad.exe', 'winword.exe', 'excel.exe', 'powerpnt.exe']);
 const DROP_END_MS = 300; // the drop reaches the overlay about when the button goes up: keep the strip this long
 const DROP_START_MS = 200; // a plain click near the edge looks like a drag for a moment: wait this long before showing the strip
 
@@ -163,8 +165,10 @@ function createHandoff(ctx) {
     // editor: "code.exe" or "cursor.exe" when the window is a code editor, else null.
     let doc = null;
     if (msg.kind === 'document') {
+      if (msg.error) { drag = { error: String(msg.error), hwnd: msg.hwnd }; return; }
       if (typeof msg.path !== 'string' || !msg.path) return; // a document window with no saved file: ignore
-      doc = { path: msg.path, editor: EDITORS.has(msg.app) ? msg.app : null };
+      doc = { path: msg.path, editor: EDITORS.has(msg.app) ? msg.app : null,
+        app: DOCUMENT_APPS.has(msg.app) ? msg.app : null, keepSource: msg.keepSource === true };
     } else {
       if (msg.tabCount !== 1 || !msg.url) return; // several tabs, or no URL: ignore the whole drag (E4.9)
       if (/^file:/i.test(msg.url)) {
@@ -176,13 +180,13 @@ function createHandoff(ctx) {
   }
 
   function onPreview(header, bytes) {
-    if (!drag || !bytes) return;
+    if (!drag || drag.hwnd !== header.hwnd || drag.error || !bytes) return;
     drag.preview = { mime: header.mime, width: toDip(header.width), height: toDip(header.height), bytes };
     if (drag.transfer) sendPreview(drag.transfer, drag.preview);
   }
 
   function onDragMove(msg) {
-    if (!drag) return;
+    if (!drag || drag.hwnd !== msg.hwnd || drag.error) return;
     const edge = msg.edge || null;
     const target = edge ? neighbourOn(edge) : null;
     let t = drag.transfer;
@@ -209,7 +213,13 @@ function createHandoff(ctx) {
   }
 
   function onDragEnd(msg) {
-    if (!drag) return;
+    if (!drag || drag.hwnd !== msg.hwnd) return;
+    if (drag.error) {
+      const error = drag.error;
+      drag = null;
+      if (msg.cursorAtEdge && msg.edge && neighbourOn(msg.edge)) notify('error', error);
+      return;
+    }
     const t = drag.transfer;
     drag = null;
     if (!t) return;
@@ -257,27 +267,34 @@ function createHandoff(ctx) {
     const size = bytes.length;
     const { centerRatio, width, height } = t.lastMove;
     const editor = t.doc.editor;
-    if (editor) bridge.send({ type: 'BOUNCE_WINDOW', hwnd: t.hwnd, edge: t.edge });
+    const keepSource = editor || t.doc.keepSource;
+    if (keepSource) bridge.send({ type: 'BOUNCE_WINDOW', hwnd: t.hwnd, edge: t.edge });
     else bridge.send({ type: 'HIDE_WINDOW', hwnd: t.hwnd });
+    // Register before sending: a quick peer can acknowledge synchronously.
+    waiting.set(t.id, t);
+    const ms = receiverMode === 'approval' ? times.fileReplyApproval : times.fileReply;
+    t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), ms);
+    show('COMMIT', 'sender', t.edge, t.id, {
+      kind: 'tab', title: filename, url: 'file:///' + encodeURIComponent(filename), filename, size,
+      fromName: myProfile().displayName, mode: modeOf(selfId()), direct: false,
+    });
     const sent = transport.sendToPeer(t.target, {
       type: 'TRANSFER_COMMIT', transferId: t.id, kind: 'file', open: true, ...(t.browser ? { browser: t.browser } : {}), title: t.title,
-      edge: t.edge, centerRatio, width, height, filename, size, direct: false, ...(editor ? { app: editor } : {}),
+      edge: t.edge, centerRatio, width, height, filename, size, direct: false, ...(t.doc.app ? { app: t.doc.app } : {}),
     });
     if (!sent) {
       // It never left: bring the window back now instead of after the long wait (an editor's never went away).
-      if (!editor) bridge.send({ type: 'SHOW_WINDOW', hwnd: t.hwnd });
+      clearTimeout(t.timer);
+      waiting.delete(t.id);
+      if (!keepSource) bridge.send({ type: 'SHOW_WINDOW', hwnd: t.hwnd });
       cancelOutgoing(t);
       return notify('error', 'Could not reach that laptop');
     }
-    transport.sendBinaryToPeer(t.target, { type: 'FILE_PAYLOAD', transferId: t.id, filename, mimeType: 'application/octet-stream', size }, bytes);
-    show('COMMIT', 'sender', t.edge, t.id, {
-      kind: 'tab', title: filename, url: 'file:///' + encodeURIComponent(filename), filename, size, // 'tab' keeps the picture
-      fromName: myProfile().displayName, mode: modeOf(selfId()), direct: false,
-    });
-    waiting.set(t.id, t);
-    // The receiver may need up to a minute for the bytes: the long file timer, not the 5 s tab one.
-    const ms = receiverMode === 'approval' ? times.fileReplyApproval : times.fileReply;
-    t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), ms);
+    if (!waiting.has(t.id)) return; // receiver immediately refused the commit
+    if (!transport.sendBinaryToPeer(t.target, { type: 'FILE_PAYLOAD', transferId: t.id, filename, mimeType: 'application/octet-stream', size }, bytes)) {
+      finishOutgoing(t, 'FAILED');
+      transport.sendToPeer(t.target, { type: 'EDGE_DRAG_CANCEL', transferId: t.id });
+    }
   }
 
   // A waiting transfer is over: close our window (accepted) or bring it back.
@@ -285,7 +302,7 @@ function createHandoff(ctx) {
   function finishOutgoing(t, result) {
     clearTimeout(t.timer);
     waiting.delete(t.id);
-    if (!t.file && !(t.doc && t.doc.editor)) bridge.send({ type: result === 'PLACED' ? 'CLOSE_WINDOW' : 'SHOW_WINDOW', hwnd: t.hwnd });
+    if (!t.file && !(t.doc && (t.doc.editor || t.doc.keepSource))) bridge.send({ type: result === 'PLACED' ? 'CLOSE_WINDOW' : 'SHOW_WINDOW', hwnd: t.hwnd });
     if ((t.file || t.doc) && result === 'FAILED') notify('error', 'File was not delivered');
     show(result, 'sender', t.edge, t.id);
   }
@@ -437,19 +454,22 @@ function createHandoff(ctx) {
     const c = r.commit;
     let cmd;
     if (!r.saved) cmd = { type: 'OPEN_URL', transferId: r.id, url: c.url, browser: c.browser, ...box }; // a tab
-    else if (r.editor) cmd = { type: 'OPEN_FILE', transferId: r.id, path: r.saved, ...box, app: r.editor }; // the same code editor
+    else if (r.app) cmd = { type: 'OPEN_FILE', transferId: r.id, path: r.saved, ...box, app: r.app }; // the same supported application
     else if (c.browser) cmd = { type: 'OPEN_URL', transferId: r.id, url: url.pathToFileURL(r.saved).href, browser: c.browser, ...box }; // it was open in a browser
     else cmd = { type: 'OPEN_FILE', transferId: r.id, path: r.saved, ...box }; // its own program (Notepad, Word...)
-    const sent = bridge.send(cmd);
-    if (!sent) return openFailed(r, 'no sidecar');
+    if (r.saved) cmd.expiresAt = Date.now() + times.documentOpen;
     r.stage = 'opening';
-    r.timer = setTimeout(() => openFailed(r, 'timeout'), times.open);
+    r.timer = setTimeout(() => openFailed(r, 'timeout'), r.saved ? times.documentOpen + 100 : times.open);
+    if (!bridge.send(cmd)) return openFailed(r, 'no sidecar');
   }
 
-  // Our sidecar could not open it. A file for an editor is saved all the same
-  // (maybe that editor is not installed here): show it in its folder, it arrived.
+  // Opening failed: retain/reveal the received bytes, but do not tell the sender
+  // to close its source as though a document window had opened successfully.
   function openFailed(r, error) {
-    if (r.editor) return delivered(r, r.saved);
+    if (r.saved) {
+      try { revealFile(r.saved); } catch {}
+      notify('error', 'The file arrived in Downloads/Odyssync, but could not be opened: ' + error);
+    }
     endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error });
   }
 
@@ -496,8 +516,9 @@ function createHandoff(ctx) {
       forget(r);
       return reply(r, { type: 'TRANSFER_FAILED', error: 'invalid' });
     }
-    // A file from a code editor opens in that editor; any other app name is ignored.
+    // Only supported app names can select a launcher.
     r.editor = msg.open === true && EDITORS.has(msg.app) ? msg.app : null;
+    r.app = msg.open === true && DOCUMENT_APPS.has(msg.app) ? msg.app : null;
     // A document to open keeps the sliding picture: for the overlay it looks like a tab.
     const card = msg.open === true
       ? { kind: 'tab', title: filename, url: 'file:///' + encodeURIComponent(filename) }
@@ -533,9 +554,12 @@ function createHandoff(ctx) {
     } catch {
       return endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'could not save' });
     }
-    // Only ordinary documents open by themselves; any file opens in an editor (our sidecar starts it).
-    const editorHere = r.editor && bridge.isConnected();
+    r.saved = full;
+    if (r.commit.open === true && r.app && !bridge.isConnected()) return openFailed(r, 'no sidecar');
+    // Only ordinary documents open by themselves; text editors display any file.
+    const editorHere = (r.editor || r.app === 'notepad.exe') && bridge.isConnected();
     if (r.commit.open === true && (editorHere || OPENABLE.has(path.extname(full).toLowerCase()))) return openSaved(r, full);
+    if (r.commit.open === true) return openFailed(r, 'this file type cannot be opened automatically');
     delivered(r, full);
   }
 

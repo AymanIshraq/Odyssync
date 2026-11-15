@@ -15,6 +15,12 @@ from sidecar.windows import browser_for_window, process_exe, window_process
 # A lone new window whose title does not name the file is accepted only after
 # this long, so an interim startup window is not mistaken for the document.
 OPEN_FILE_GRACE_SECONDS = 1.5
+DOCUMENT_APPS = frozenset({*EDITOR_APPS, "notepad.exe", "winword.exe", "excel.exe", "powerpnt.exe"})
+OFFICE_EXTENSIONS = {
+    "winword.exe": {".doc", ".docx", ".rtf", ".odt", ".txt"},
+    "excel.exe": {".xls", ".xlsx", ".csv", ".ods"},
+    "powerpnt.exe": {".ppt", ".pptx", ".odp"},
+}
 
 
 def clamp_rect(x, y, width, height, work_area):
@@ -69,8 +75,13 @@ def validate_open_file(message, is_file=is_regular_file):
             or not os.path.isabs(path) or not is_file(path)):
         raise ValueError("OPEN_FILE requires an absolute path to an existing regular file")
     app = message.get("app")  # Absent or null: the file's default program.
-    if app is not None and (not isinstance(app, str) or app not in EDITOR_APPS):
-        raise ValueError("OPEN_FILE app must be a supported editor")
+    if app is not None and (not isinstance(app, str) or app not in DOCUMENT_APPS):
+        raise ValueError("OPEN_FILE app must be a supported document application")
+    if app in OFFICE_EXTENSIONS and Path(path).suffix.lower() not in OFFICE_EXTENSIONS[app]:
+        raise ValueError("This file type cannot be automatically opened in that Office application")
+    expires = message.get("expiresAt")
+    if expires is not None and (type(expires) not in (int, float) or not 0 < expires < float('inf')):
+        raise ValueError("OPEN_FILE expiry must be a finite timestamp")
     validate_rect(message)
 
 
@@ -336,7 +347,7 @@ class WindowController:
     def is_own_app(self, hwnd):
         handle = window_process(hwnd)
         try:
-            return process_exe(handle) == "electron.exe"
+            return process_exe(handle) in ("electron.exe", "odyssync.exe")
         finally:
             handle.Close()
 
@@ -353,15 +364,51 @@ class WindowController:
         if not executable:
             raise FileNotFoundError("editor not installed")
         try:
-            subprocess.Popen([executable, "--new-window", path], shell=False)
+            environment = os.environ.copy()
+            environment.pop("ELECTRON_RUN_AS_NODE", None)
+            subprocess.Popen([executable, "--new-window", path], shell=False, env=environment)
         except OSError as error:
             code = getattr(error, "winerror", None) or error.errno
             raise OSError(f"Could not start the editor (error {code})") from None
+
+    def launch_document(self, app, path):
+        """Only fixed, supported programs; never execute a received file itself."""
+        if app in EDITOR_APPS:
+            return self.launch_editor(app, path)
+        executable = registry_app_path(app)
+        if not executable and app == "notepad.exe":
+            executable = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "notepad.exe")
+        if not executable:
+            raise FileNotFoundError("The sender's document application is not installed here")
+        # Separate instances make Office startup/window matching deterministic.
+        switches = {"winword.exe": ["/n"], "excel.exe": ["/x"]}.get(app, [])
+        subprocess.Popen([executable, *switches, path], shell=False)
+
+    def document_windows(self, app):
+        windows = self.titled_windows()
+        if not app:
+            return windows
+        matched = {}
+        for hwnd, title in windows.items():
+            try:
+                handle = window_process(hwnd)
+                try:
+                    if process_exe(handle) == app:
+                        matched[hwnd] = title
+                finally:
+                    handle.Close()
+            except Exception:
+                continue
+        return matched
 
     def open_file(self, message, stopped):
         """Serialized on the command worker, like open_url."""
         validate_open_file(message)
         path = message["path"]
+        expires = message.get("expiresAt")
+        remaining = min(20, (expires / 1000 - time.time())) if expires is not None else 20
+        if remaining <= 0:
+            raise TimeoutError("Document transfer expired before opening")
         # Hidden handles count as old: a restored hidden window is never "new".
         before = self.titled_windows(everything=True)
         if stopped.is_set():
@@ -369,16 +416,16 @@ class WindowController:
         if message.get("app") is None:
             self.launch_file(path)
         else:
-            self.launch_editor(message["app"], path)  # A new window in the sender's editor.
+            self.launch_document(message["app"], path)
         started = time.monotonic()
-        deadline = started + 4
+        deadline = started + remaining
         ambiguous = False
         while not stopped.is_set():
             now = time.monotonic()
             if now >= deadline:
                 break
-            status, hwnd = choose_opened_window(before, self.titled_windows(), ntpath.basename(path),
-                                                now - started >= OPEN_FILE_GRACE_SECONDS)
+            status, hwnd = choose_opened_window(before, self.document_windows(message.get("app")), ntpath.basename(path),
+                                                not message.get("app") and now - started >= OPEN_FILE_GRACE_SECONDS)
             ambiguous = status == "ambiguous"
             if status in ("new", "existing"):
                 if status == "new":
@@ -387,4 +434,4 @@ class WindowController:
             stopped.wait(0.05)
         if ambiguous:
             raise RuntimeError("Several windows could show the opened file; refusing to guess")
-        raise TimeoutError("No window showing the file appeared within 4 seconds, or bridge disconnected")
+        raise TimeoutError("No window showing the file appeared before the deadline, or bridge disconnected")

@@ -246,10 +246,10 @@ class ReadWindowTests(unittest.TestCase):
                 return read_window_document(10), directory, choose, office
 
     def test_level2_result_shape(self):
-        result, path, choose, office = self.read("notepad.exe", 'notepad.exe "C:\\a b.txt"', "a b.txt - Notepad")
+        result, path, choose, office = self.read("reader.exe", 'reader.exe "C:\\a b.txt"', "a b.txt - Reader")
         self.assertEqual(result, {"hwnd": 10, "kind": "document", "path": path,
-                                  "title": "a b.txt - Notepad", "app": "notepad.exe"})
-        self.assertEqual(choose.call_args[0][:2], (["notepad.exe", "C:\\a b.txt"], "a b.txt - Notepad"))
+                                  "title": "a b.txt - Reader", "app": "reader.exe"})
+        self.assertEqual(choose.call_args[0][:2], (["reader.exe", "C:\\a b.txt"], "a b.txt - Reader"))
         office.assert_not_called()
 
     def test_level3_asks_office_and_own_app_is_refused(self):
@@ -261,7 +261,7 @@ class ReadWindowTests(unittest.TestCase):
             self.read("electron.exe", "electron.exe C:\\app\\main.js", "main.js")
 
     def test_editor_path_comes_from_the_title_not_the_command_line(self):
-        title = "\u25cf C:\\proj\\main.py - proj - Visual Studio Code"
+        title = "C:\\proj\\main.py - proj - Visual Studio Code"
         for exe in ("code.exe", "cursor.exe"):
             gui = Mock()
             gui.GetWindowText.return_value = title
@@ -394,9 +394,9 @@ class OpenFileTests(unittest.TestCase):
                 validate_open_file(open_file_message(self.path, changes))
 
     def test_validation_of_the_editor_app(self):
-        for app in ("code.exe", "cursor.exe", None):
+        for app in ("code.exe", "cursor.exe", "notepad.exe", None):
             validate_open_file(open_file_message(self.path, app=app))
-        for app in ("Code.exe", "notepad.exe", "", 5, ["code.exe"], {"x": 1}):
+        for app in ("Code.exe", "cmd.exe", "", 5, ["code.exe"], {"x": 1}):
             with self.subTest(app=app), self.assertRaises(ValueError):
                 validate_open_file(open_file_message(self.path, app=app))
 
@@ -405,6 +405,7 @@ class OpenFileTests(unittest.TestCase):
             controller = WindowController()
         controller.work_area = Mock(return_value=(0, 0, 1920, 1040))
         controller.titled_windows = Mock(side_effect=lambda everything=False: snapshots.pop(0))
+        controller.document_windows = Mock(side_effect=lambda app: snapshots.pop(0))
         controller.launch_file = Mock()
         return controller
 
@@ -425,7 +426,7 @@ class OpenFileTests(unittest.TestCase):
                                  ([{}] + [{8: "A", 9: "B"}] * 3, RuntimeError)]:
             with self.subTest(error=error):
                 controller = self.controller(snapshots)
-                with patch("sidecar.handoff.time.monotonic", side_effect=[0, 0, 1, 5]), self.assertRaises(error):
+                with patch("sidecar.handoff.time.monotonic", side_effect=[0, 0, 1, 21]), self.assertRaises(error):
                     controller.open_file(open_file_message(self.path), threading.Event())
                 controller.gui.SetWindowPos.assert_not_called()
 
@@ -437,7 +438,9 @@ class OpenFileTests(unittest.TestCase):
             result = controller.open_file(open_file_message(self.path, app="code.exe"), threading.Event())
         self.assertEqual(result, {"type": "WINDOW_PLACED", "transferId": "t1", "hwnd": 9})
         find.assert_called_once_with("code.exe")
-        popen.assert_called_once_with(["C:\\VS Code\\Code.exe", "--new-window", self.path], shell=False)
+        self.assertEqual(popen.call_args.args[0], ["C:\\VS Code\\Code.exe", "--new-window", self.path])
+        self.assertFalse(popen.call_args.kwargs['shell'])
+        self.assertNotIn('ELECTRON_RUN_AS_NODE', popen.call_args.kwargs['env'])
         controller.launch_file.assert_not_called()
         startfile.assert_not_called()
         controller.gui.SetWindowPos.assert_called_once_with(9, 0, 0, 10, 800, 600, 0x14)

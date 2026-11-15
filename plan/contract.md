@@ -115,7 +115,7 @@ in the spec: same result, less code.)
 | `WINDOW_PREVIEW_FRAME` (binary) | header `transferId, mime, width, height`; payload JPEG |
 | `EDGE_DRAG_MOVE` | `transferId, edge, protrusionPx, centerRatio, width, height` |
 | `EDGE_DRAG_CANCEL` | `transferId` |
-| `TRANSFER_COMMIT` | `transferId, kind: "tab" | "file", edge, centerRatio, width, height, url?, title?, browser?, filename?, size?, direct?: boolean` |
+| `TRANSFER_COMMIT` | `transferId, kind: "tab" | "file", edge, centerRatio, width, height, url?, title?, browser?, filename?, size?, direct?: boolean, open?: boolean, app?: string` |
 | `FILE_PAYLOAD` (binary) | header `transferId, filename, mimeType, size`; payload bytes; max 50 MB |
 
 Receiver → sender:
@@ -153,7 +153,7 @@ Sidecar → Electron:
 | Message | Fields |
 |---|---|
 | `SIDECAR_READY` | `screenWidth, screenHeight, dpiScale` |
-| `LOCAL_DRAG_START` | `hwnd, browser, url, title, tabCount` (only sent when `tabCount == 1` and a URL was read) |
+| `LOCAL_DRAG_START` | Browser: `hwnd, browser, url, title, tabCount` (only when `tabCount == 1` and a URL was read). Document variant below. |
 | `LOCAL_WINDOW_PREVIEW` (binary) | header `hwnd, mime, width, height` |
 | `LOCAL_DRAG_MOVE` | `hwnd, edge, protrusionPx, centerRatio, width, height, cursorX, cursorY, cursorAtEdge` (`edge` is null outside the 120 px zones) |
 | `LOCAL_DRAG_END` | `hwnd, edge, cursorAtEdge, velocity` |
@@ -169,8 +169,45 @@ Electron → sidecar:
 | `HIDE_WINDOW` / `SHOW_WINDOW` / `CLOSE_WINDOW` | `hwnd` |
 | `BOUNCE_WINDOW` | `hwnd, edge` |
 | `OPEN_URL` | `transferId, url, browser, x, y, width, height` |
+| `OPEN_FILE` | `transferId, path, app?, expiresAt?, x, y, width, height` (document extension below) |
 
 `cursorAtEdge` is true when the cursor is within 4 px of the screen edge.
+
+### Document-window extension (integration branch)
+
+This records the document flow already introduced on integration and its Windows
+fixes. Browser messages, renderer APIs, coordinate units and file-drop behavior
+are unchanged. A document still uses `kind: "file"` and `FILE_PAYLOAD` on the network.
+
+- A successful document `LOCAL_DRAG_START` carries `hwnd, kind: "document",
+  path, title, app, keepSource?`. `path` is local only and never sent to peers.
+  `keepSource: true` prevents closing other tabs in a Notepad window. Code editors
+  also retain their project window; only the active saved file is copied.
+- A supported application that cannot supply its document sends the same local
+  start with `kind: "document", hwnd, error` instead of a path. Electron shows
+  that error only on an attempted drop at an occupied edge. No preview, file or
+  window command is sent for that failed lookup.
+- Notepad supplies a temporary UTF-8/CRLF plain-text snapshot of its complete
+  active document, including unsaved text. Word/Excel/PowerPoint require a saved
+  local document with no pending edits. VS Code/Cursor require the one-time
+  `window.title` setting in `sidecar/README.md` and a saved active file.
+- For a document, `TRANSFER_COMMIT` includes `open: true` and optionally `app`.
+  The receiver saves a unique filename in `Downloads/Odyssync`, then opens it.
+  Recognized app values: `notepad.exe`, `winword.exe`, `excel.exe`, `powerpnt.exe`,
+  `code.exe`, `cursor.exe`. Unknown app values cannot select an executable.
+  Office launches are restricted to ordinary supported document extensions;
+  executable/script files may only be displayed in a supported text editor.
+- `OPEN_FILE.path` is the receiver's saved path. Its coordinates are physical
+  pixels. `expiresAt` is an optional receiver-generated Unix timestamp in
+  milliseconds; queued commands that have expired must not launch an app.
+  It reports `WINDOW_PLACED` or `OPEN_FAILED`, just like `OPEN_URL`.
+- Document startup gets 20 seconds; the sender allows 90 seconds for payload,
+  animation and startup, or 120 seconds in Approval mode. A missing application
+  leaves the received copy in Downloads, reports failure and restores the source
+  window. Saving alone does not count as a successful document auto-open.
+- A released drag can wait up to 2 seconds for its outstanding native lookup.
+  It retains the exact release coordinates; another click or focus change
+  cancels this deferred release. Stale results never start another drag.
 
 For the voice assistant (request, then reply):
 

@@ -165,10 +165,12 @@ class DragTracker:
         if generation != self.generation or self.hwnd != info.get("hwnd"):
             return None
         if info.get("kind") == "document":
-            if not isinstance(info.get("path"), str) or not info["path"]:
+            if not info.get("error") and (not isinstance(info.get("path"), str) or not info["path"]):
                 return None
             start = {"type": "LOCAL_DRAG_START", "hwnd": info["hwnd"], "kind": "document",
-                     "path": info["path"], "title": info.get("title", ""), "app": info.get("app", "")}
+                     "path": info.get("path", ""), "title": info.get("title", ""), "app": info.get("app", ""),
+                     **({"error": info["error"]} if info.get("error") else {}),
+                     **({"keepSource": True} if info.get("keepSource") else {})}
         elif info.get("tabCount") != 1 or not info.get("url"):
             return None
         else:
