@@ -11,6 +11,7 @@ import time
 from urllib.parse import urlsplit
 
 from sidecar.windows import browser_for_window
+from sidecar.drag import is_new_tab_url, new_tab_url
 
 
 @contextmanager
@@ -210,14 +211,30 @@ class WindowController:
         # A preexisting hidden source may be restored while this launch is
         # pending. Visibility changes must never count as a new destination.
         before = self.window_handles()
-        executable = find_browser(message["browser"])
+        target_browser = message["browser"]
+        executable = find_browser(target_browser)
+        url = message["url"]
+        if is_new_tab_url(url):
+            # Internal schemes are not Windows URL handlers. If the sender's
+            # browser is absent, open the receiver browser's own new-tab page.
+            if not executable:
+                for candidate in ("chrome", "msedge", "brave"):
+                    if candidate == target_browser:
+                        continue
+                    executable = find_browser(candidate)
+                    if executable:
+                        target_browser = candidate
+                        break
+            if not executable:
+                raise OSError("No supported browser is installed to open a new tab")
+            url = new_tab_url(target_browser)
         if stopped.is_set():
             raise RuntimeError("Bridge disconnected before browser launch")
-        self.launch(message["url"], executable)
+        self.launch(url, executable)
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline and not stopped.is_set():
             candidates = {hwnd: browser for hwnd, browser in self.browser_windows().items()
-                          if hwnd not in before and (not executable or browser == message["browser"])}
+                          if hwnd not in before and (not executable or browser == target_browser)}
             if len(candidates) > 1:
                 raise RuntimeError("Ambiguous new browser windows; refusing to place an unrelated window")
             if candidates:

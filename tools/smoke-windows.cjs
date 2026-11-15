@@ -8,8 +8,9 @@ const { fileURLToPath } = require('node:url');
 const { randomBytes } = require('node:crypto');
 const WebSocket = require('../app/node_modules/ws');
 const config = require('../app/config.json');
+const { version } = require('../app/package.json');
 
-const executable = path.resolve(__dirname, '../dist/windows/Odyssync-0.1.0-portable.exe');
+const executable = path.resolve(__dirname, '../dist/windows/Odyssync-' + version + '-portable.exe');
 const env = Object.fromEntries(Object.entries(process.env)
   .filter(([key]) => !/^(path|pythonhome|pythonpath|electron_run_as_node)$/i.test(key)));
 env.Path = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');

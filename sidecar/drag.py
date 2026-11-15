@@ -3,12 +3,26 @@
 from dataclasses import dataclass
 
 
+def new_tab_url(browser: str) -> str:
+    return {"chrome": "chrome://newtab/", "msedge": "edge://newtab/",
+            "brave": "brave://newtab/"}[browser]
+
+
+def is_new_tab_url(value: str) -> bool:
+    # The rendered document can use Chromium's internal new-tab-page alias.
+    return value.strip().lower().rstrip("/") in {
+        f"{scheme}://{page}" for scheme in ("chrome", "edge", "brave")
+        for page in ("newtab", "new-tab-page", "new-tab-page-third-party")}
+
+
 def normalize_url(value: str, browser: str) -> str:
     value = value.strip()
     if not value:
         return ""
     if any(character.isspace() for character in value):
         return ""
+    if is_new_tab_url(value):
+        return new_tab_url(browser)
     # Chromium internal pages must retain their browser-specific scheme.
     if "://" in value or value.startswith(("about:", "file:")):
         return value

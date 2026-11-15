@@ -15,6 +15,23 @@ The daemon logs timing and failures without logging URLs. Inspection does
 not inject input or change focus. Window commands from Electron can hide,
 restore, close, or launch a browser window.
 
+Blank single-tab windows are represented by their browser's native new-tab
+URL. With a readable empty address bar, the inspector also checks the outer
+document's native URI, so recognition does not depend on an English tab label.
+It never descends into web content or treats an unreadable address bar as
+proof of a blank page. Typed, unsubmitted search text is not a blank tab.
+If the requested browser is absent on the receiver, a new-tab handoff uses an
+installed supported browser's own new-tab URL rather than a Windows protocol
+handler. The single-tab restriction and confirmation-before-close rule remain.
+
+```powershell
+python tools/spikes/newtab_smoke.py
+```
+
+This native check creates two temporary Chrome new-tab windows, verifies
+source inspection and receiver placement, and closes only its test windows.
+It does not certify a real two-laptop handoff.
+
 ## Integration for Tech 2 / UI tracks
 
 [The contract](../plan/contract.md) owns all message names and fields.
