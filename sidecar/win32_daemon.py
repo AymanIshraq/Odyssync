@@ -1,4 +1,4 @@
-"""Windows sidecar: browser drags, previews, and native handoff commands."""
+"""Windows sidecar: browser and document drags, previews, and native handoff commands."""
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -13,11 +13,13 @@ import threading
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from sidecar.documents import DocumentReadError, read_dragged_window
 from sidecar.drag import DragTracker, FileDragTracker
 from sidecar.handoff import WindowController
 from sidecar.lookups import lookup_reply
+from sidecar.notepad import clear_snapshots
 from sidecar.preview import capture_preview
-from sidecar.windows import WindowsDesktop, enable_dpi_awareness, read_browser_tab, warm_browser_worker
+from sidecar.windows import WindowsDesktop, enable_dpi_awareness, warm_browser_worker
 
 log = logging.getLogger(__name__)
 BRIDGE_URL = "ws://127.0.0.1:8089"
@@ -37,7 +39,7 @@ class BrowserReader:
     def submit(self, hwnd):
         if self.pending is not None and not self.pending.done():
             return None
-        self.pending = self.executor.submit(read_browser_tab, hwnd)
+        self.pending = self.executor.submit(read_dragged_window, hwnd)
         return asyncio.wrap_future(self.pending)
 
     def close(self):
@@ -105,9 +107,10 @@ async def receive_commands(socket, active, controller=None, outbox=None, executo
 
     async def open_window(message):
         try:
-            result = await asyncio.get_running_loop().run_in_executor(executor, controller.open_url, message, stopped)
+            opener = controller.open_url if message["type"] == "OPEN_URL" else controller.open_file
+            result = await asyncio.get_running_loop().run_in_executor(executor, opener, message, stopped)
         except Exception as error:
-            log.warning("Window command OPEN_URL failed: %s", error)
+            log.warning("Window command %s failed: %s", message["type"], error)
             result = {"type": "OPEN_FAILED", "transferId": message.get("transferId"), "error": str(error)}
         outbox.put(result)
 
@@ -162,12 +165,13 @@ async def command_stream(socket, active, controller, outbox, executor, stopped, 
                             lambda future: None if future.cancelled() else future.exception())
                 if outbox is not None:
                     outbox.put(result)
-            elif message.get("type") in ("HIDE_WINDOW", "SHOW_WINDOW", "CLOSE_WINDOW", "OPEN_URL", "BOUNCE_WINDOW"):
+            elif message.get("type") in ("HIDE_WINDOW", "SHOW_WINDOW", "CLOSE_WINDOW", "OPEN_URL", "OPEN_FILE",
+                                         "BOUNCE_WINDOW"):
                 if controller is None or outbox is None:
                     raise ValueError("Window command handler is unavailable")
                 loop = asyncio.get_running_loop()
                 try:
-                    if message["type"] == "OPEN_URL":
+                    if message["type"] in ("OPEN_URL", "OPEN_FILE"):
                         opening.add(asyncio.create_task(open_window(message)))
                     elif message["type"] == "BOUNCE_WINDOW":
                         await loop.run_in_executor(executor, controller.bounce,
@@ -182,7 +186,7 @@ async def command_stream(socket, active, controller, outbox, executor, stopped, 
                     raise
                 except Exception as error:
                     log.warning("Window command %s failed: %s", message["type"], error)
-                    if message["type"] == "OPEN_URL":
+                    if message["type"] in ("OPEN_URL", "OPEN_FILE"):
                         outbox.put({"type": "OPEN_FAILED", "transferId": message.get("transferId"),
                                     "error": str(error)})
             else:
@@ -191,7 +195,7 @@ async def command_stream(socket, active, controller, outbox, executor, stopped, 
             log.warning("Ignoring malformed bridge command", exc_info=True)
 
 
-async def poll_desktop(desktop, active, outbox, reader, previews=None):
+async def poll_desktop(desktop, active, outbox, reader, previews=None, documents=None):
     tracker = DragTracker()
     files = FileDragTracker()
     pending = None
@@ -202,6 +206,8 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None):
     cache_generation = None
     preview_data = None
     preview_edge = None
+    release_sample = None
+    release_deadline = 0
     loop = asyncio.get_running_loop()
     try:
         while True:
@@ -211,8 +217,47 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None):
                 info = desktop.screen_info()
                 for event in files.update(sample, (info["screenWidth"], info["screenHeight"]), active):
                     outbox.put(event)
-                events, request = tracker.update(
-                    sample, (info["screenWidth"], info["screenHeight"]), active)
+                if release_sample is not None and (sample.pressed or sample.hwnd != release_sample.hwnd):
+                    # A new gesture/focus change revokes a deferred release.
+                    tracker.reset()
+                    release_sample = None
+                # Consume qualification BEFORE mouse-up resets the generation.
+                if pending is not None and pending.done():
+                    try:
+                        start = tracker.qualify(pending_generation, pending.result())
+                        if start:
+                            if start.get("kind") == "document" and documents is not None:
+                                documents.add(start["hwnd"])
+                            outbox.put(start)
+                    except Exception as error:
+                        log.info("Window qualification failed: %s", error)
+                        if isinstance(error, DocumentReadError) and pending_generation == tracker.generation:
+                            start = tracker.qualify(pending_generation, {"hwnd": tracker.hwnd,
+                                                    "kind": "document", "error": str(error)})
+                            if start:
+                                outbox.put(start)
+                    pending = None
+                qualifying = ((pending is not None and pending_generation == tracker.generation)
+                              or (requested is not None and requested[0] == tracker.generation))
+                if (release_sample is None and tracker.hwnd == sample.hwnd and not sample.pressed
+                        and not tracker.started and qualifying):
+                    # Office may finish a COM read only when its native move loop
+                    # ends. Retain the exact release position, never a later cursor.
+                    release_sample = sample
+                    release_deadline = loop.time() + 2
+                if release_sample is not None and qualifying and not tracker.started and loop.time() < release_deadline:
+                    events, request = [], None
+                else:
+                    if release_sample is not None and qualifying and not tracker.started:
+                        start = tracker.qualify(tracker.generation, {"hwnd": tracker.hwnd, "kind": "document",
+                                                "error": "Reading this window took too long. Please try the swipe again."})
+                        if start:
+                            outbox.put(start)
+                    events, request = tracker.update(
+                        release_sample or sample, (info["screenWidth"], info["screenHeight"]), active)
+                    release_sample = None
+                if request:
+                    requested = request
                 if cache_generation != tracker.generation:
                     cache_generation = tracker.generation
                     preview_data = None
@@ -237,20 +282,9 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None):
                             preview_pending = previews.submit(event["hwnd"])
                             preview_generation = tracker.generation
                     outbox.put(event)
-                # Retain only the current drag's request while UIA is busy.
-                # Never stack native calls or reuse an earlier drag's result.
-                if request:
-                    requested = request
+                # Keep only the current gesture while the bounded lookup worker is busy.
                 if requested and requested != (tracker.generation, tracker.hwnd):
                     requested = None
-                if pending is not None and pending.done():
-                    try:
-                        start = tracker.qualify(pending_generation, pending.result())
-                        if start:
-                            outbox.put(start)
-                    except Exception:
-                        log.warning("Browser qualification failed; ignoring drag", exc_info=True)
-                    pending = None
                 if requested and pending is None:
                     pending_generation, hwnd = requested
                     pending = reader.submit(hwnd)
@@ -264,6 +298,7 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None):
                     outbox.put({"type": "LOCAL_DRAG_END", "hwnd": tracker.hwnd,
                                 "edge": None, "cursorAtEdge": False, "velocity": 0.0})
                 tracker.reset()
+                release_sample = None
                 requested = None
                 if files.edge is not None:
                     outbox.put({"type": "LOCAL_FILE_DRAG", "active": False, "edge": files.edge})
@@ -291,7 +326,8 @@ async def run_session(socket, desktop, reader, controller=None, previews=None, l
     await socket.send(json.dumps({"type": "SIDECAR_READY", **desktop.screen_info()}))
     tasks = [asyncio.create_task(receive_commands(socket, active, controller, outbox, commands, stopped,
                                                   desktop, lookups, visibility)),
-             asyncio.create_task(poll_desktop(desktop, active, outbox, reader, previews)),
+             asyncio.create_task(poll_desktop(desktop, active, outbox, reader, previews,
+                                              getattr(controller, "documents", None))),
              asyncio.create_task(outbox.send(socket))]
     tasks.append(asyncio.create_task(socket.wait_closed()))
     try:
@@ -309,6 +345,7 @@ async def run_session(socket, desktop, reader, controller=None, previews=None, l
         # Ordered after any in-flight command so a delayed hide cannot escape
         # restoration. A disconnect is never permission to close the original.
         await asyncio.get_running_loop().run_in_executor(commands, controller.restore_hidden)
+        clear_snapshots()
         commands.shutdown(wait=False, cancel_futures=True)
         visibility.shutdown(wait=False, cancel_futures=True)
         if own_previews:

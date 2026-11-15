@@ -15,6 +15,7 @@ const approval = OverlayApproval.createApproval({
   api: window.odyssync, ghosts,
 });
 const voice = OverlayVoice.createVoice({ document });
+const dropStrip = OverlayDropStrip.createDropStrip({ document, viewport: () => ({ width: innerWidth, height: innerHeight }), api: window.odyssync });
 window.addEventListener('mousemove', approval.move);
 window.addEventListener('mouseleave', approval.leave);
 window.addEventListener('blur', approval.leave);
@@ -24,6 +25,7 @@ window.odyssync.onEvent(event => {
   bezel.receive(event);
   approval.receive(event);
   voice.receive(event);
+  dropStrip.receive(event);
 });
 function frame(now) {
   ghosts.frame(now);

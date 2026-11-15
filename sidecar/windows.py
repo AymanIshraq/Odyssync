@@ -75,23 +75,33 @@ class WindowsDesktop:
         return hwnd
 
 
-def browser_for_window(hwnd: int) -> str:
+def window_process(hwnd: int):
+    """Handle to the window's process; the caller must Close() it."""
     import win32api
     import win32process
     _, pid = win32process.GetWindowThreadProcessId(hwnd)
-    handle = win32api.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+    return win32api.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+
+
+def process_exe(handle) -> str:
+    """Lower-case exe file name of an open process handle, e.g. "chrome.exe"."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    query = kernel.QueryFullProcessImageNameW
+    query.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                      ctypes.POINTER(wintypes.DWORD)]
+    query.restype = wintypes.BOOL
+    size = wintypes.DWORD(32768)
+    path = ctypes.create_unicode_buffer(size.value)
+    if not query(int(handle), 0, path, ctypes.byref(size)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return PureWindowsPath(path.value).name.lower()
+
+
+def browser_for_window(hwnd: int) -> str:
+    handle = window_process(hwnd)
     try:
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        query = kernel.QueryFullProcessImageNameW
-        query.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
-                          ctypes.POINTER(wintypes.DWORD)]
-        query.restype = wintypes.BOOL
-        size = wintypes.DWORD(32768)
-        path = ctypes.create_unicode_buffer(size.value)
-        if not query(int(handle), 0, path, ctypes.byref(size)):
-            raise ctypes.WinError(ctypes.get_last_error())
         return {"chrome.exe": "chrome", "msedge.exe": "msedge",
-                "brave.exe": "brave"}.get(PureWindowsPath(path.value).name.lower(), "")
+                "brave.exe": "brave"}.get(process_exe(handle), "")
     finally:
         handle.Close()
 

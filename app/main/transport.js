@@ -29,7 +29,9 @@ function createTransport(deviceId) {
   function connect(name, url, timeoutMs = 5000) {
     close(name);
     return new Promise((resolve) => {
-      const socket = new WebSocket(url);
+      // During a long file upload our answers to the server's pings queue up behind the file;
+      // ws's default limit of 60 waiting answers would make us close our own connection. 0 = no limit.
+      const socket = new WebSocket(url, { maxPendingAutoPongs: 0 });
       sockets[name] = socket;
       let opened = false;
       let settled = false;

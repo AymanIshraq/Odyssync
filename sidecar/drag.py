@@ -1,6 +1,34 @@
 """Platform-independent drag lifecycle and physical-pixel edge geometry."""
 
 from dataclasses import dataclass
+import re
+from urllib.parse import quote, unquote
+
+# Windows that can never show a document: shell, Explorer (own file-drag
+# path), dialogs, and consoles (a script's console title names the script,
+# and closing it would kill the running program).
+NOT_DOCUMENT_CLASSES = frozenset({
+    "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+    "CabinetWClass", "ExploreWClass", "#32770", "Windows.UI.Core.CoreWindow",
+    "XamlExplorerHostIslandWindow", "ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"})
+
+
+def local_file_url(value: str):
+    """Canonical file:///C:/... URL for a local file, "" if refused, None if not a local file."""
+    if value[:5].lower() == "file:":
+        # A URL: "?" and "#" end the path (Chromium writes literal ones as %3F/%23).
+        path = unquote(re.split(r"[?#]", value[5:], maxsplit=1)[0])
+        path = path.replace("\\", "/").lstrip("/")
+    elif re.match(r"[A-Za-z]:[\\/]", value):
+        path = unquote(value).replace("\\", "/")
+    elif value.startswith("\\\\"):
+        return ""  # UNC share: not a local file.
+    else:
+        return None
+    if not re.match(r"[A-Za-z]:/", path) or any(ord(c) < 32 for c in path):
+        return ""
+    # Decoding first means an already-encoded URL is never encoded twice.
+    return "file:///" + path[0].upper() + quote(path[1:], safe="/:")
 
 
 def new_tab_url(browser: str) -> str:
@@ -19,6 +47,9 @@ def normalize_url(value: str, browser: str) -> str:
     value = value.strip()
     if not value:
         return ""
+    local = local_file_url(value)
+    if local is not None:
+        return local  # Local file names may contain spaces; web addresses may not.
     if any(character.isspace() for character in value):
         return ""
     if is_new_tab_url(value):
@@ -131,7 +162,9 @@ class DragTracker:
                                "velocity": velocity})
             self.reset()
         if (self.hwnd is None and previous and sample.pressed and previous.pressed
-                and sample.browser_window and sample.hwnd == previous.hwnd
+                and (sample.browser_window or (sample.hwnd and sample.class_name
+                                               and sample.class_name not in NOT_DOCUMENT_CLASSES))
+                and sample.hwnd == previous.hwnd
                 and sample.rect != previous.rect):
             self.hwnd = sample.hwnd
             self.generation += 1
@@ -142,9 +175,19 @@ class DragTracker:
         return events, request
 
     def qualify(self, generation: int, info: dict):
-        if (generation != self.generation or self.hwnd != info.get("hwnd")
-                or type(info.get("tabCount")) is not int or info["tabCount"] < 1
-                or not info.get("url")):
+        """Accept the selected browser tab or a document result for this drag."""
+        if generation != self.generation or self.hwnd != info.get("hwnd"):
             return None
+        if info.get("kind") == "document":
+            if not info.get("error") and (not isinstance(info.get("path"), str) or not info["path"]):
+                return None
+            start = {"type": "LOCAL_DRAG_START", "hwnd": info["hwnd"], "kind": "document",
+                     "path": info.get("path", ""), "title": info.get("title", ""), "app": info.get("app", ""),
+                     **({"error": info["error"]} if info.get("error") else {}),
+                     **({"keepSource": True} if info.get("keepSource") else {})}
+        elif type(info.get("tabCount")) is not int or info["tabCount"] < 1 or not info.get("url"):
+            return None
+        else:
+            start = {"type": "LOCAL_DRAG_START", **info}
         self.started = True
-        return {"type": "LOCAL_DRAG_START", **info}
+        return start

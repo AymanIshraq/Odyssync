@@ -15,7 +15,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from sidecar.drag import DragTracker, Sample
-from sidecar.handoff import WindowController, find_browser
+from sidecar.handoff import WindowController, find_browser, browser_launch_environment
 from sidecar.windows import enable_dpi_awareness, read_browser_tab
 
 
@@ -69,6 +69,14 @@ def main():
         chrome = find_browser("chrome")
         if not chrome:
             raise RuntimeError("Chrome is required for this native smoke test")
+        # A dedicated receiver profile avoids the user's Chrome profile picker.
+        # Both windows remain disposable; no personal profile is changed.
+        def launch_receiver(url, executable):
+            with browser_launch_environment():
+                subprocess.Popen([executable, "--user-data-dir=" + str(root / "receiver-profile"),
+                                  "--no-first-run", "--no-default-browser-check", "--disable-background-mode",
+                                  "--new-window", url])
+        controller.launch = launch_receiver
         process = subprocess.Popen([chrome, "--user-data-dir=" + str(root / "profile"),
                                     "--no-first-run", "--no-default-browser-check", "--disable-background-mode",
                                     "--new-window", *urls])

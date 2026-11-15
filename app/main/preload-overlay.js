@@ -1,7 +1,7 @@
 // window.odyssync for the overlay (contract.md, "Renderer API" > Overlay).
 // The overlay only reacts to events sent from main, so this is already the real
 // version: main (later room.js, for now tools/replay.js) sends 'overlay:event'.
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('odyssync', {
   // cb(event): PREVIEW, DRAG_MOVE, CANCEL, COMMIT, PLACED, BOUNCE, REJECTED,
@@ -16,4 +16,7 @@ contextBridge.exposeInMainWorld('odyssync', {
 
   // Where the ghost card ended, so the real window opens on the same spot.
   ghostSettled: (transferId, rect) => ipcRenderer.send('overlay:ghostSettled', transferId, rect),
+
+  // A file dropped on the drop strip: main gets its path on disk and how many files were dropped.
+  fileDropped: (edge, file, count) => ipcRenderer.send('overlay:fileDropped', edge, webUtils.getPathForFile(file), count),
 });

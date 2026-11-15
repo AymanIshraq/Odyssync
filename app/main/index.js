@@ -1,6 +1,6 @@
 // Electron entry: creates the Control Center window and the overlay window.
 const path = require('path');
-const { app, BrowserWindow, screen, ipcMain } = require('electron');
+const { app, BrowserWindow, screen, ipcMain, shell } = require('electron');
 const sidecarBridge = require('./sidecar-bridge');
 const os = require('os');
 const room = require('./room');
@@ -35,7 +35,8 @@ function createOverlayWindow() {
     focusable: false,
     hasShadow: false,
     resizable: false,
-    webPreferences: { preload: path.join(__dirname, 'preload-overlay.js') },
+    // Keep drawing even when the system thinks the overlay is in the background, or its animations can stall.
+    webPreferences: { preload: path.join(__dirname, 'preload-overlay.js'), backgroundThrottling: false },
   });
   overlayWin.setAlwaysOnTop(true, 'screen-saver');
   overlayWin.setIgnoreMouseEvents(true, { forward: true }); // click-through
@@ -45,7 +46,7 @@ function createOverlayWindow() {
 app.whenReady().then(() => {
   const { size, scaleFactor } = screen.getPrimaryDisplay();
   const profile = { displayName: os.hostname(), screenWidth: size.width, screenHeight: size.height, dpiScale: scaleFactor };
-  manager = room.createRoomManager({ relayUrl: config.relayUrl, localPort: config.localPort, profile, bridge: sidecarBridge, overlay: room.wireOverlay(ipcMain, () => overlayWin) });
+  manager = room.createRoomManager({ relayUrl: config.relayUrl, localPort: config.localPort, profile, bridge: sidecarBridge, overlay: room.wireOverlay(ipcMain, () => overlayWin), revealFile: (p) => shell.showItemInFolder(p), openFile: (p) => shell.openPath(p) });
   room.wireIpc(ipcMain, () => controlWin, manager);
   manager.onState((state) => sidecarBridge.setActiveEdges(room.activeEdges(state)));
   createControlWindow();

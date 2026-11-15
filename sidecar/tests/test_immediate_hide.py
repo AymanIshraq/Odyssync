@@ -13,6 +13,12 @@ from sidecar.win32_daemon import Outbox, receive_commands
 
 class ImmediateHideTests(unittest.IsolatedAsyncioTestCase):
     async def test_hide_runs_while_an_incoming_browser_open_is_still_busy(self):
+        await self.check_busy_open("OPEN_URL")
+
+    async def test_hide_runs_while_an_incoming_document_open_is_still_busy(self):
+        await self.check_busy_open("OPEN_FILE")
+
+    async def check_busy_open(self, kind):
         started, release, finished = threading.Event(), threading.Event(), threading.Event()
         hidden_while_opening = []
         controller = Mock()
@@ -24,6 +30,7 @@ class ImmediateHideTests(unittest.IsolatedAsyncioTestCase):
             return {"type": "WINDOW_PLACED", "transferId": "incoming", "hwnd": 20}
 
         controller.open_url.side_effect = opening
+        controller.open_file.side_effect = opening
         controller.hide.side_effect = lambda hwnd: hidden_while_opening.append(not finished.is_set())
 
         class Socket:
@@ -31,7 +38,7 @@ class ImmediateHideTests(unittest.IsolatedAsyncioTestCase):
                 return self.messages()
 
             async def messages(self):
-                yield json.dumps({"type": "OPEN_URL", "transferId": "incoming"})
+                yield json.dumps({"type": kind, "transferId": "incoming"})
                 await asyncio.to_thread(started.wait, 2)
                 yield json.dumps({"type": "HIDE_WINDOW", "hwnd": 10})
                 release.set()
