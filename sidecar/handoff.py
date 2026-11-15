@@ -1,13 +1,37 @@
 """Native handoff operations. Electron alone decides when a tab may close."""
 
+from contextlib import contextmanager
+import ctypes
 import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 from urllib.parse import urlsplit
 
 from sidecar.windows import browser_for_window
+
+
+@contextmanager
+def browser_launch_environment():
+    """Do not pass the frozen helper's DLL search path to an installed browser."""
+    if not getattr(sys, "frozen", False):
+        yield
+        return
+    bundle = os.path.normcase(os.path.abspath(sys._MEIPASS))
+    original_path = os.environ.get("PATH", "")
+    ctypes.windll.kernel32.SetDllDirectoryW(None)
+    try:
+        # UI Automation may add its bundled bin directory to PATH as well.
+        os.environ["PATH"] = os.pathsep.join(
+            entry for entry in original_path.split(os.pathsep)
+            if not (os.path.normcase(os.path.abspath(entry.strip('"'))) == bundle
+                    or os.path.normcase(os.path.abspath(entry.strip('"'))).startswith(bundle + os.sep)))
+        yield
+    finally:
+        os.environ["PATH"] = original_path
+        ctypes.windll.kernel32.SetDllDirectoryW(sys._MEIPASS)
 
 
 def clamp_rect(x, y, width, height, work_area):
@@ -174,10 +198,11 @@ class WindowController:
         return windows
 
     def launch(self, url, executable):
-        if executable:
-            subprocess.Popen([executable, "--new-window", url], shell=False)
-        else:
-            os.startfile(url)
+        with browser_launch_environment():
+            if executable:
+                subprocess.Popen([executable, "--new-window", url], shell=False)
+            else:
+                os.startfile(url)
 
     def open_url(self, message, stopped):
         """Serialized on the command worker. Never claim success for an old window."""

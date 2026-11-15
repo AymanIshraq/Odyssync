@@ -1,0 +1,3 @@
+# Only the build computer needs these tools; end users need no Python install.
+-r requirements.txt
+PyInstaller==6.22.3

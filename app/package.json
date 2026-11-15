@@ -2,15 +2,20 @@
   "name": "odyssync",
   "version": "0.1.0",
   "private": true,
+  "description": "Share browser windows between Windows laptops",
+  "author": "Odyssync",
   "main": "main/index.js",
   "scripts": {
     "start": "electron .",
-    "server": "node server/server.js"
+    "server": "node server/server.js",
+    "dist:win": "node ../tools/build-windows.cjs",
+    "test:packaging": "node --test main/sidecar-launch.test.cjs"
   },
   "dependencies": {
     "ws": "^8.23.0"
   },
   "devDependencies": {
-    "electron": "^45.3.2"
+    "electron": "^45.3.2",
+    "electron-builder": "26.18.0"
   }
 }
