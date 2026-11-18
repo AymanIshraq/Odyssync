@@ -310,7 +310,7 @@ class WindowController:
                 browser = browser_for_window(hwnd)
                 if browser:
                     windows[hwnd] = browser
-            except OSError:
+            except (OSError, ValueError):
                 pass  # Window may disappear during enumeration.
         return windows
 

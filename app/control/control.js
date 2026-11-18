@@ -258,15 +258,19 @@
       const el = document.createElement('div');
       el.className = `screen ${state.isHost ? 'host-draggable' : ''} ${s.deviceId === selfId() ? 'self' : ''} ${sending.has(s.deviceId) ? 'sending' : ''}`;
       el.dataset.id = s.deviceId;
-      el.innerHTML = `<span class="screen-number">${String(i+1).padStart(2,'0')}</span><div class="device-art" aria-hidden="true">${laptop(['blue','orange','lime','blue'][i%4])}</div><span class="screen-name">${esc(title)}</span><span class="screen-you">${s.deviceId === selfId() ? 'Your laptop' : sending.has(s.deviceId) ? 'Sending…' : 'Right-click: send tab'}</span>`;
+      el.innerHTML = `<span class="screen-number">${String(i+1).padStart(2,'0')}</span><div class="device-art" aria-hidden="true">${laptop(['blue','orange','lime','blue'][i%4])}</div><span class="screen-name">${esc(title)}</span><span class="screen-you">${s.deviceId === selfId() ? 'Your laptop' : sending.has(s.deviceId) ? 'Sending…' : 'Right-click: send…'}</span>`;
       position(el,s); canvas.append(el);
-      if (s.deviceId !== selfId() && typeof api.sendDirect === 'function') {
-        const id = s.deviceId; el.tabIndex = 0; el.title = 'Right-click to send your browser tab';
+      if (s.deviceId !== selfId() && typeof api.sendDirect === 'function' && typeof api.listSendable === 'function') {
+        const id = s.deviceId; el.tabIndex = 0; el.title = 'Right-click to send a tab, document or file';
         el.oncontextmenu = async e => {
           e.preventDefault(); if (sending.has(id)) return; sending.add(id); paintCanvas();
-          try { const r = await api.sendDirect(id); notify(r?.ok ? `Tab sent to ${title}` : r?.error || 'Could not send the tab.'); }
-          catch (err) { notify('Could not send the tab.'); }
-          finally { sending.delete(id); paintCanvas(); }
+          let r;
+          try { r = await api.listSendable(id); } catch (err) { r = null; }
+          sending.delete(id); paintCanvas();
+          if (!r?.ok) { notify(r?.error || 'Could not read your open windows.'); return; }
+          const items = r.items || [];
+          if (items.length === 1) { closeSendDialog(); await sendItem(id,title,items[0].id); return; }
+          openSendDialog(id,title,items);
         };
       }
       if (state.isHost) {
@@ -284,6 +288,48 @@
         };
       }
     });
+  }
+  async function sendItem(id,title,itemId,after) {
+    sending.add(id); paintCanvas();
+    let text;
+    try { const r = await api.sendDirect({deviceId:id,itemId}); text = r?.ok ? `Sent to ${title}` : r?.error || 'Could not send.'; }
+    catch (err) { text = 'Could not send.'; }
+    finally { sending.delete(id); if (after) after(); paintCanvas(); }
+    notify(text);
+  }
+  function closeSendDialog() { document.querySelectorAll('.send-dialog').forEach(d => { if (d.open) d.close(); d.remove(); }); }
+  function openSendDialog(id,title,items) {
+    closeSendDialog();
+    if (!items.length) { notify('Nothing to send. Open a tab or document first.'); return; }
+    const dialog = document.createElement('dialog');
+    dialog.className = 'entry-dialog send-dialog'; dialog.dataset.deviceId = id; dialog.setAttribute('aria-labelledby','send-title');
+    const kindWord = i => i.kind === 'tab' ? 'tab' : 'file';
+    dialog.innerHTML = `<form method="dialog"><h2 id="send-title">Select to send</h2><div class="send-list" role="radiogroup" aria-label="Items to send">${items.map((it,i) => `<button type="button" role="radio" aria-checked="${i===0}" data-i="${i}"><span class="send-badge ${/^(ZIP|RAR|7Z|EXE|FILE)$/i.test(it.badge||'') ? 'warm' : ''}">${esc(it.badge)}</span><span class="send-text"><b>${esc(it.name)}</b><small>${esc(it.detail)}</small></span><span class="send-check" aria-hidden="true">✓</span></button>`).join('')}</div><div class="send-footer"><span class="send-count"></span><button class="send-button" type="submit">Send file</button></div></form>`;
+    document.body.append(dialog);
+    const rows = [...dialog.querySelectorAll('[role=radio]')], sendBtn = dialog.querySelector('.send-button');
+    let sel = 0, sendingNow = false;
+    const paint = () => {
+      rows.forEach((row,i) => { row.setAttribute('aria-checked',String(i===sel)); row.tabIndex = i===sel ? 0 : -1; });
+      const w = kindWord(items[sel]); dialog.querySelector('.send-count').textContent = `1 ${w} selected`; sendBtn.textContent = `Send ${w}`;
+    };
+    paint();
+    rows.forEach((row,i) => row.onclick = () => { if (sendingNow) return; sel = i; paint(); });
+    dialog.querySelector('.send-list').onkeydown = e => {
+      if (sendingNow || !['ArrowUp','ArrowDown'].includes(e.key)) return;
+      e.preventDefault(); sel = (sel + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length; paint(); rows[sel].focus();
+    };
+    dialog.addEventListener('cancel',e => { e.preventDefault(); if (!sendingNow) closeSendDialog(); });
+    dialog.addEventListener('click',e => {
+      if (e.target !== dialog || sendingNow) return;
+      const b = dialog.getBoundingClientRect();
+      if (e.clientX < b.left || e.clientX > b.right || e.clientY < b.top || e.clientY > b.bottom) closeSendDialog();
+    });
+    dialog.querySelector('form').onsubmit = async e => {
+      e.preventDefault(); if (sendingNow) return;
+      sendingNow = true; sendBtn.disabled = true; rows.forEach(r => r.disabled = true); sendBtn.textContent = 'Sending…';
+      await sendItem(id,title,items[sel].id,closeSendDialog);
+    };
+    dialog.showModal(); rows[0].focus();
   }
   function position(el,s) {
     el.style.left = `${transform.x+s.x*transform.scale}px`; el.style.top = `${transform.y+s.y*transform.scale}px`;
@@ -342,6 +388,8 @@
   if (api) {
     api.onState(next => {
       state = next; if (!name) name = selfName(); if (drag) drag = null;
+      const sd = document.querySelector('.send-dialog');
+      if (sd && !(state.members || []).some(m => m.deviceId === sd.dataset.deviceId) && !(state.screens || []).some(x => x.deviceId === sd.dataset.deviceId)) closeSendDialog();
       if (view === 'room') {
         const managementDialog = state.isHost && ['requests','permissions'].includes(dialogKind) ? dialogKind : null;
         if (!state.isHost) dialogKind = null;

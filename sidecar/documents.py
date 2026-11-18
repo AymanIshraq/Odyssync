@@ -186,7 +186,7 @@ def office_window_path(app: str, office, hwnd: int, root, is_file) -> str:
         if same_handle(handle, hwnd) or same_handle(root(handle), hwnd):
             current = document(window)
             if getattr(current, "Saved", True) is False:
-                raise ValueError("Save the active Office document before swiping it")
+                raise ValueError("Save the file first")
             names.append(current.FullName)
     if len(names) != 1:
         raise ValueError("Office has no single document window for this handle")
@@ -296,7 +296,7 @@ def read_window_document(hwnd: int) -> dict:
             path = office_document(app, hwnd)
         elif app in EDITOR_APPS:
             if title.startswith("\u25cf "):
-                raise ValueError("Save the active editor file before swiping it")
+                raise ValueError("Save the file first")
             path = editor_title_path(title, is_regular_file)
         elif app == "notepad.exe":
             from sidecar.notepad import notepad_document

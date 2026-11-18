@@ -2,7 +2,7 @@
 
 Last updated: 2026-11-15
 
-**Overall: about 30% built. About 70% left.** Four people (two tech, two UI); 16 hours remained when planning began.
+**Overall: about 30.4% built. About 69.6% left.** Four people (two tech, two UI); 16 hours remained when planning began.
 
 Percentages are each component's share of all the work. Every tier is in scope.
 
@@ -50,7 +50,7 @@ percentages below remain at 0% accepted (100% acceptance work remains).
 | # | Component | Track | Share | Done |
 |---|---|---|---|---|
 | 13 | File drag and drop, transfer, file card | T1, T2, U2 | 6% | 70% (drop strip on the overlay, sending, saving to Downloads\\Odyssync, modes, 50 MB limit built and tested with pretend parts and real files on a Mac and through the live relay for files up to 4 MB; larger files through the relay need the new server.js deployed; a real drag from Windows File Explorer is untested) |
-| 14 | Direct send: target pills and "Send to" | U2, U1 | 4% | 30% (right-click on any other person's card in the Control Center sends your last-used browser tab (web pages only), for host and members alike; several sends can wait at once; tested on a Mac with real right-clicks in the real app and a pretend Windows helper (14 checks), not yet on Windows; target pills on the overlay left) |
+| 14 | Direct send: target pills and "Send to" | U2, U1 | 4% | 40% (right-click any other person's card in the Control Center opens a "Select to send" window listing what is open right now: browser tabs, open documents (Notepad, Word, Excel, PowerPoint, VS Code, Cursor, PDFs) and the file selected in File Explorer; pick one and press Send; your window stays open; the page behind freezes; tested on a Mac in the real app with a pretend Windows helper (12 checks) plus unit tests, not yet on Windows; target pills on the overlay left) |
 | 15 | Kick | T2, U1 | 2% | 60% (server and app side done; UI 1's button left) |
 | 16 | Roster with ping, mode and transport badges | U1 | 2% | 0% |
 

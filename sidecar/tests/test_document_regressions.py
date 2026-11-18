@@ -67,7 +67,7 @@ class DocumentSafetyTests(unittest.TestCase):
     def test_unsaved_office_changes_require_save(self):
         doc = SimpleNamespace(FullName='C:\\Docs\\report.docx', Saved=False)
         office = SimpleNamespace(Windows=[SimpleNamespace(Hwnd=10, Document=doc)])
-        with self.assertRaisesRegex(ValueError, 'Save the active Office'):
+        with self.assertRaisesRegex(ValueError, '^Save the file first$'):
             office_window_path('winword.exe', office, 10, lambda hwnd: hwnd, lambda path: True)
 
     def test_dirty_editor_never_transfers_outdated_disk_contents(self):
@@ -76,7 +76,7 @@ class DocumentSafetyTests(unittest.TestCase):
         with patch.dict('sys.modules', {'win32gui': gui}), \
                 patch('sidecar.documents.window_process', return_value=Mock()), \
                 patch('sidecar.documents.process_exe', return_value='code.exe'), \
-                self.assertRaisesRegex(DocumentReadError, 'Save the active editor'):
+                self.assertRaisesRegex(DocumentReadError, '^Save the file first$'):
             read_window_document(10)
 
     def test_office_only_accepts_appropriate_document_types(self):

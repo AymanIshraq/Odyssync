@@ -28,6 +28,7 @@ const DEFAULT_TIMEOUTS = {
   fileReplyApproval: 120000, // plus 30 s for approval
   filePayload: 60000, // receiver: the file's bytes must arrive within 60 s of its commit
   documentOpen: 20000, // Office and VS Code can take longer than a warm browser
+  lookup: 2500, // sender: our sidecar must answer LIST_OPEN_WINDOWS / GET_WINDOW_ITEM within 2.5 s
 };
 const OPPOSITE = { LEFT: 'RIGHT', RIGHT: 'LEFT', TOP: 'BOTTOM', BOTTOM: 'TOP' };
 const MAX_FILE = 50 * 1024 * 1024; // FILE_PAYLOAD is at most 50 MB
@@ -124,6 +125,18 @@ function createHandoff(ctx) {
     const found = ['left', 'right', 'top', 'bottom'].find((e) => mine[e] === fromId);
     if (found) return found.toUpperCase();
     return OPPOSITE[senderEdge] || 'LEFT';
+  }
+
+  // Check and read a file we are about to send: { bytes } or { error } (a message for the user).
+  function readSendable(filePath) {
+    let stat;
+    try { stat = fs.statSync(filePath); } catch { return { error: 'Could not read that file' }; }
+    if (!stat.isFile()) return { error: 'Folders cannot be sent. Zip the folder first.' };
+    if (stat.size > MAX_FILE) return { error: 'File is too large (max 50 MB)' };
+    let bytes;
+    try { bytes = fs.readFileSync(filePath); } catch { return { error: 'Could not read that file' }; }
+    if (bytes.length > MAX_FILE) return { error: 'File is too large (max 50 MB)' }; // it grew meanwhile
+    return { bytes };
   }
 
   // ================= SENDER: our sidecar reports a drag =================
@@ -256,13 +269,9 @@ function createHandoff(ctx) {
   // A code editor window is not hidden: it slides back (it usually holds a whole
   // project) and only the file goes, with the editor's name.
   function commitDocument(t, receiverMode) {
-    let stat;
-    try { stat = fs.statSync(t.doc.path); } catch { cancelOutgoing(t); return notify('error', 'Could not read that file'); }
-    if (!stat.isFile()) { cancelOutgoing(t); return notify('error', 'Folders cannot be sent. Zip the folder first.'); }
-    if (stat.size > MAX_FILE) { cancelOutgoing(t); return notify('error', 'File is too large (max 50 MB)'); }
-    let bytes;
-    try { bytes = fs.readFileSync(t.doc.path); } catch { cancelOutgoing(t); return notify('error', 'Could not read that file'); }
-    if (bytes.length > MAX_FILE) { cancelOutgoing(t); return notify('error', 'File is too large (max 50 MB)'); } // it grew meanwhile
+    const read = readSendable(t.doc.path);
+    if (read.error) { cancelOutgoing(t); return notify('error', read.error); }
+    const bytes = read.bytes;
     const filename = path.win32.basename(t.doc.path); // a Windows path (also splits at "/")
     const size = bytes.length;
     const { centerRatio, width, height } = t.lastMove;
@@ -302,8 +311,11 @@ function createHandoff(ctx) {
   function finishOutgoing(t, result) {
     clearTimeout(t.timer);
     waiting.delete(t.id);
-    // A direct send: our tab stays open, so no window command and no overlay event; just answer the button.
-    if (t.direct) return t.done(result === 'PLACED' ? { ok: true } : { ok: false, error: result === 'REJECTED' ? t.name + ' declined the tab' : 'The tab could not be opened on ' + t.name + '\'s laptop' });
+    // A direct send: our window stays open, so no window command and no overlay event; just answer the button.
+    if (t.direct) {
+      if (result === 'PLACED') return t.done({ ok: true, what: t.what });
+      return t.done({ ok: false, error: result === 'REJECTED' ? t.name + ' declined the ' + t.what : 'The ' + t.what + ' could not be delivered to ' + t.name });
+    }
     if (!t.file && !(t.doc && (t.doc.editor || t.doc.keepSource))) bridge.send({ type: result === 'PLACED' ? 'CLOSE_WINDOW' : 'SHOW_WINDOW', hwnd: t.hwnd });
     if ((t.file || t.doc) && result === 'FAILED') notify('error', 'File was not delivered');
     show(result, 'sender', t.edge, t.id);
@@ -318,53 +330,135 @@ function createHandoff(ctx) {
     else finishOutgoing(t, 'FAILED'); // rule 6
   }
 
-  // ================= SENDER: the "Send tab" button (a copy: our tab stays open) =================
+  // ================= SENDER: right-click a person, pick what to send (a copy: ours stays open) =================
 
-  let direct = null; // the one tab lookup in progress (ACTIVE_TAB has no id): { target, name, done, lookupTimer }
+  let lookup = null; // the one question to our sidecar in progress: { type, hwnd, done, timer }
 
-  // Ask our sidecar for the last-used browser tab, then send its URL to this member.
-  // Always resolves: { ok: true } once it opened there, else { ok: false, error }.
-  function sendDirect(target) {
+  // Why we cannot send to this member right now, or null.
+  function cannotSend(target) {
+    if (!isMember(target)) return 'That laptop is not in the room';
+    if (!bridge.isConnected()) return 'Odyssync\'s Windows helper is not running';
+    if (modeOf(target) === 'focus') return nameOf(target) + ' is in Focus mode';
+    if (lookup) return 'Still working on your last send';
+    return null;
+  }
+
+  // Ask our sidecar one question and wait for its answer of type `answerType`.
+  // Always resolves: the answer, or { error } (also when it took too long).
+  function ask(request, answerType, timeoutError) {
     return new Promise((resolve) => {
-      if (!isMember(target)) return resolve({ ok: false, error: 'That laptop is not in the room' });
-      if (!bridge.isConnected()) return resolve({ ok: false, error: 'Odyssync\'s Windows helper is not running' });
-      if (modeOf(target) === 'focus') return resolve({ ok: false, error: nameOf(target) + ' is in Focus mode' });
-      if (direct) return resolve({ ok: false, error: 'Still reading your last tab' });
-      const d = { target, name: nameOf(target), lookupTimer: null };
-      d.done = (answer) => { clearTimeout(d.lookupTimer); if (direct === d) direct = null; resolve(answer); };
-      direct = d; // before asking: a quick sidecar can answer at once
-      d.lookupTimer = setTimeout(() => d.done({ ok: false, error: 'Could not read your browser tab' }), 2500);
-      if (!bridge.send({ type: 'GET_ACTIVE_TAB' })) d.done({ ok: false, error: 'Odyssync\'s Windows helper is not running' });
+      const l = { type: answerType, hwnd: request.hwnd, timer: null };
+      l.done = (msg) => { clearTimeout(l.timer); if (lookup === l) lookup = null; resolve(msg); };
+      lookup = l; // before asking: a quick sidecar can answer at once
+      l.timer = setTimeout(() => l.done({ error: timeoutError }), times.lookup);
+      if (!bridge.send(request)) l.done({ error: 'Odyssync\'s Windows helper is not running' });
     });
   }
 
-  // Our sidecar's ACTIVE_TAB answer: commit the tab to the waiting direct send. After that it waits in `waiting` like any transfer.
-  function onActiveTab(msg) {
-    const d = direct;
-    if (!d) return; // nobody asked: ignore
-    clearTimeout(d.lookupTimer);
-    direct = null; // the lookup is over: the next press may start its own
-    if (msg.error !== undefined) return d.done({ ok: false, error: typeof msg.error === 'string' && msg.error ? msg.error : 'Could not read your browser tab' });
-    if (typeof msg.url !== 'string' || !/^https?:\/\//i.test(msg.url)) return d.done({ ok: false, error: 'Only web pages can be sent this way' });
-    if (!isMember(d.target)) return d.done({ ok: false, error: 'That laptop is not in the room' });
-    const receiverMode = modeOf(d.target);
-    if (receiverMode === 'focus') return d.done({ ok: false, error: d.name + ' is in Focus mode' });
-    // Our edge that faces this laptop, if it sits beside us; else none (it shows up on its RIGHT).
-    const mine = (getState().neighbors || {})[selfId()] || {};
-    const side = ['left', 'right', 'top', 'bottom'].find((e) => mine[e] === d.target);
-    const t = { id: crypto.randomUUID(), target: d.target, name: d.name, direct: true, done: d.done, timer: null };
-    // Register before sending: a quick peer can answer at once.
-    waiting.set(t.id, t);
-    t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), receiverMode === 'approval' ? times.replyApproval : times.reply);
-    const sent = transport.sendToPeer(t.target, {
-      type: 'TRANSFER_COMMIT', transferId: t.id, kind: 'tab', edge: side ? side.toUpperCase() : null, centerRatio: 0.5, width: 1280, height: 800,
-      url: msg.url, title: msg.title, browser: msg.browser, direct: true,
-    });
-    if (!sent && waiting.has(t.id)) {
-      clearTimeout(t.timer);
-      waiting.delete(t.id);
-      d.done({ ok: false, error: 'Could not reach that laptop' });
+  // Our sidecar's OPEN_WINDOWS or WINDOW_ITEM: hand it to the question that waits for it.
+  function onLookupAnswer(msg) {
+    const l = lookup;
+    if (!l || l.type !== msg.type || (msg.type === 'WINDOW_ITEM' && msg.hwnd !== l.hwnd)) return;
+    l.done(msg);
+  }
+
+  const errorText = (msg, fallback) => (typeof msg.error === 'string' && msg.error ? msg.error : fallback);
+  const BROWSERS = { 'chrome.exe': 'Chrome', 'msedge.exe': 'Edge', 'brave.exe': 'Brave' };
+  const APP_NAMES = { 'notepad.exe': 'Notepad', 'winword.exe': 'Word', 'excel.exe': 'Excel', 'powerpnt.exe': 'PowerPoint', 'code.exe': 'VS Code', 'cursor.exe': 'Cursor' };
+  const TITLE_END = / - (Google Chrome|Microsoft​? Edge|Brave|Notepad|Word|Excel|PowerPoint|Visual Studio Code|Cursor)$/;
+
+  // One open window as a row of the "Select to send" list.
+  function listItem(w) {
+    const app = String(w.app || '').toLowerCase();
+    let name;
+    if (w.kind === 'explorer') name = String(w.name || '');
+    else {
+      name = String(w.title || '').replace(TITLE_END, '').replace(/^(● |\*)/, '');
+      if (EDITORS.has(app)) name = name.split(' - ')[0]; // "file.js - project" -> "file.js"
     }
+    const ext = /\.([a-z0-9]{1,4})$/i.exec(name);
+    const badge = w.kind === 'browser' ? 'WEB' : ext ? ext[1].toUpperCase() : EDITORS.has(app) ? 'CODE' : 'FILE';
+    const exe = app.replace(/\.exe$/, '');
+    let detail;
+    if (w.kind === 'browser') detail = (BROWSERS[app] || exe) + ' tab';
+    else if (w.kind === 'explorer') detail = 'Selected in File Explorer';
+    else detail = 'Open in ' + (APP_NAMES[app] || exe);
+    const kind = w.kind === 'browser' ? 'tab' : w.kind === 'explorer' ? 'file' : 'document';
+    return { id: w.hwnd, kind, badge, name: name || detail, detail };
+  }
+
+  // What is open on this laptop that could go to this member.
+  // Always resolves: { ok: true, items: [{ id, kind, badge, name, detail }] } or { ok: false, error }.
+  async function listSendable(target) {
+    const no = cannotSend(target);
+    if (no) return { ok: false, error: no };
+    const msg = await ask({ type: 'LIST_OPEN_WINDOWS' }, 'OPEN_WINDOWS', 'Could not read your open windows');
+    if (msg.error !== undefined) return { ok: false, error: errorText(msg, 'Could not read your open windows') };
+    const items = (Array.isArray(msg.windows) ? msg.windows : []).map(listItem);
+    if (!items.length) return { ok: false, error: 'Open a browser tab, document or File Explorer window first' };
+    return { ok: true, items };
+  }
+
+  // Send the picked window's tab, document or selected file to this member.
+  // Always resolves: { ok: true, what } once it arrived there, else { ok: false, error }.
+  async function sendDirect(target, itemId) {
+    const no = cannotSend(target);
+    if (no) return { ok: false, error: no };
+    const item = await ask({ type: 'GET_WINDOW_ITEM', hwnd: itemId }, 'WINDOW_ITEM', 'Could not read that window');
+    if (item.error !== undefined) return { ok: false, error: errorText(item, 'Could not read that window') };
+    if (!isMember(target)) return { ok: false, error: 'That laptop is not in the room' };
+    if (modeOf(target) === 'focus') return { ok: false, error: nameOf(target) + ' is in Focus mode' };
+    let filePath = item.path;
+    let what = item.kind;
+    if (item.kind === 'tab') {
+      const u = typeof item.url === 'string' ? item.url : '';
+      if (/^https?:\/\//i.test(u)) {
+        return commitDirect(target, 'tab', { kind: 'tab', width: 1280, height: 800, url: u, title: item.title, browser: item.browser });
+      }
+      if (!/^file:/i.test(u)) return { ok: false, error: 'Only web pages can be sent this way' };
+      try { filePath = url.fileURLToPath(u, { windows: true }); } catch { return { ok: false, error: 'Could not read that file' }; }
+      what = 'document';
+    } else if (item.kind !== 'document' && item.kind !== 'file') {
+      return { ok: false, error: 'Could not read that window' };
+    }
+    if (typeof filePath !== 'string' || !filePath) return { ok: false, error: 'Could not read that file' };
+    const read = readSendable(filePath);
+    if (read.error) return { ok: false, error: read.error };
+    const filename = path.win32.basename(filePath);
+    const fields = what === 'document'
+      ? { kind: 'file', open: true, ...(item.kind === 'document' && DOCUMENT_APPS.has(item.app) ? { app: item.app } : {}), ...(item.kind === 'tab' && item.browser ? { browser: item.browser } : {}), width: 1280, height: 800, filename, size: read.bytes.length, title: item.title }
+      : { kind: 'file', width: 320, height: 200, filename, size: read.bytes.length, title: item.name || filename };
+    return commitDirect(target, what, fields, read.bytes);
+  }
+
+  // Commit a direct send (and a file's bytes); it then waits in `waiting` like any transfer.
+  function commitDirect(target, what, fields, bytes) {
+    return new Promise((done) => {
+      // Our edge that faces this laptop, if it sits beside us; else none (it shows up on its RIGHT).
+      const mine = (getState().neighbors || {})[selfId()] || {};
+      const side = ['left', 'right', 'top', 'bottom'].find((e) => mine[e] === target);
+      const t = { id: crypto.randomUUID(), target, name: nameOf(target), direct: true, what, done, timer: null };
+      const approval = modeOf(target) === 'approval';
+      const ms = bytes ? (approval ? times.fileReplyApproval : times.fileReply) : (approval ? times.replyApproval : times.reply);
+      // Register before sending: a quick peer can answer at once.
+      waiting.set(t.id, t);
+      t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), ms);
+      const sent = transport.sendToPeer(target, {
+        type: 'TRANSFER_COMMIT', transferId: t.id, ...fields, direct: true, edge: side ? side.toUpperCase() : null, centerRatio: 0.5,
+      });
+      if (!sent) {
+        if (!waiting.has(t.id)) return;
+        clearTimeout(t.timer);
+        waiting.delete(t.id);
+        return done({ ok: false, error: 'Could not reach that laptop' });
+      }
+      if (!bytes || !waiting.has(t.id)) return; // a tab, or the receiver refused the commit at once
+      const { filename, size } = fields;
+      if (!transport.sendBinaryToPeer(target, { type: 'FILE_PAYLOAD', transferId: t.id, filename, mimeType: 'application/octet-stream', size }, bytes)) {
+        finishOutgoing(t, 'FAILED');
+        transport.sendToPeer(target, { type: 'EDGE_DRAG_CANCEL', transferId: t.id });
+      }
+    });
   }
 
   // ================= SENDER: a file dropped on our overlay =================
@@ -708,7 +802,8 @@ function createHandoff(ctx) {
       case 'LOCAL_DRAG_MOVE': return onDragMove(msg);
       case 'LOCAL_DRAG_END': return onDragEnd(msg);
       case 'LOCAL_FILE_DRAG': return onFileDrag(msg);
-      case 'ACTIVE_TAB': return onActiveTab(msg);
+      case 'OPEN_WINDOWS':
+      case 'WINDOW_ITEM': return onLookupAnswer(msg);
       case 'WINDOW_PLACED': {
         const r = incoming.get(msg.transferId);
         if (r && r.stage === 'opening') endIncoming(r, 'PLACED', { type: 'TRANSFER_ACCEPTED' });
@@ -745,7 +840,7 @@ function createHandoff(ctx) {
     }
   }
 
-  return { onPeerMessage, roomChanged, sendDirect };
+  return { onPeerMessage, roomChanged, listSendable, sendDirect };
 }
 
 module.exports = { createHandoff };

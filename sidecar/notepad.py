@@ -56,8 +56,11 @@ def snapshot_name(title):
     return name
 
 
-def read_notepad_controls(root):
-    """Return complete text and tab count; never use visible text fragments."""
+def read_notepad_controls(root, minimised=False):
+    """Return complete text and tab count; never use visible text fragments.
+
+    A minimised window reports every control as offscreen, so accept that there.
+    """
     queue = deque([(root, 0)])
     editors, tabs = [], 0
     visited = 0
@@ -71,7 +74,7 @@ def read_notepad_controls(root):
             tabs += 1
             continue
         if kind in ("EditControl", "DocumentControl"):
-            if control.ClassName in ("RichEditD2DPT", "RICHEDIT50W", "Edit") and not control.IsOffscreen:
+            if control.ClassName in ("RichEditD2DPT", "RICHEDIT50W", "Edit") and (minimised or not control.IsOffscreen):
                 editors.append(control)
             continue
         queue.extend((child, depth + 1) for child in control.GetChildren())
@@ -93,7 +96,7 @@ def notepad_document(hwnd, title):
     import win32gui
     global _snapshots
     with auto.UIAutomationInitializerInThread():
-        text, tabs = read_notepad_controls(auto.ControlFromHandle(hwnd))
+        text, tabs = read_notepad_controls(auto.ControlFromHandle(hwnd), bool(win32gui.IsIconic(hwnd)))
     if win32gui.GetWindowText(hwnd) != title:
         raise ValueError("The active Notepad tab changed; swipe it again")
     with _snapshot_lock:

@@ -283,3 +283,22 @@ label,.label{font-size:12px;font-weight:500}
 /* Right-click send: card is highlighted while its tab is being sent. */
 .screen.sending{border-color:var(--cobalt);box-shadow:0 0 0 2px var(--cobalt) inset}
 .screen.sending .screen-you{color:var(--cobalt)}
+.send-dialog{width:min(384px,calc(100% - 32px));padding:0;border-radius:16px;overflow:hidden}
+.send-dialog form{margin:0}
+.send-dialog h2{font-size:17px;font-weight:700;padding:22px 20px 14px}
+.send-list{display:grid;gap:10px;padding:0 12px 14px;max-height:60vh;overflow:auto}
+.send-list button{display:flex;align-items:center;gap:14px;width:100%;min-height:66px;padding:10px 12px;text-align:left;color:var(--text);background:#7b90b012;border:1px solid var(--line);border-radius:12px}
+.send-list button[aria-checked=true]{border-color:var(--cobalt);background:#155cf426}
+.send-list button:disabled{opacity:.6}
+.send-badge{flex:none;display:grid;place-items:center;width:40px;height:40px;border-radius:10px;background:#155cf433;color:#6d9bff;font-size:11px;font-weight:700;text-transform:uppercase}
+.send-badge.warm{background:#ff761833;color:var(--orange)}
+.send-text{flex:1;min-width:0;display:grid;gap:3px}
+.send-text b{font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.send-text small{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.send-check{color:var(--cobalt);font-size:16px;visibility:hidden}
+.send-list button[aria-checked=true] .send-check{visibility:visible}
+.send-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 20px 16px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+.send-button{min-height:36px;padding:0 18px;border:0;border-radius:9px;background:var(--cobalt);color:#fff;font-size:13px;font-weight:600}
+body.light .send-badge{background:#155cf41f;color:var(--cobalt)}
+body.light .send-badge.warm{background:#ff76181f;color:#c2520a}
+body.light .send-list button[aria-checked=true]{background:#155cf41a}

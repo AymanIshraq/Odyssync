@@ -4,6 +4,7 @@ import ctypes
 from ctypes import wintypes
 import logging
 from pathlib import PureWindowsPath
+import re
 import time
 
 from sidecar.drag import Sample, is_new_tab_url, new_tab_url, normalize_url
@@ -26,6 +27,7 @@ class WindowsDesktop:
         self.last_browser = None
         self.last_explorer = None
         self.previous_foreground = None
+        self.listed = {}  # {hwnd: pid} from the last LIST_OPEN_WINDOWS reply.
 
     def screen_info(self):
         monitor = self.api.MonitorFromPoint((0, 0), 1)
@@ -74,13 +76,110 @@ class WindowsDesktop:
             raise ValueError(error)
         return hwnd
 
+    def open_windows(self):
+        """Every sendable top-level window, topmost first. Titles and exe names only."""
+        from sidecar.documents import NOT_DOCUMENT_APPS
+        gui = self.gui
+        hwnds = []
+        gui.EnumWindows(lambda hwnd, _: hwnds.append(hwnd), None)
+
+        def infos():
+            for hwnd in hwnds:
+                try:
+                    yield {"hwnd": hwnd, "visible": gui.IsWindowVisible(hwnd), "cloaked": is_cloaked(hwnd),
+                           "exStyle": gui.GetWindowLong(hwnd, GWL_EXSTYLE), "owner": gui.GetWindow(hwnd, GW_OWNER),
+                           "title": gui.GetWindowText(hwnd), "className": gui.GetClassName(hwnd)}
+                except Exception:
+                    continue  # The window closed while we looked at it.
+
+        from sidecar.documents import EDITOR_APPS, OFFICE_APPS
+        windows = sendable_windows(infos(), process_info, NOT_DOCUMENT_APPS,
+                                   document_apps=set(OFFICE_APPS) | set(EDITOR_APPS))
+        self.listed = {window["hwnd"]: window["pid"] for window in windows}
+        return windows
+
+    def listed_window(self, hwnd):
+        """Class name of the picked window, only if it was offered and is still the same program."""
+        if type(hwnd) is not int or hwnd not in self.listed:
+            raise ValueError("That window is not in the open windows list")
+        try:
+            if self.gui.IsWindow(hwnd) and window_pid(hwnd) == self.listed[hwnd]:
+                return self.gui.GetClassName(hwnd)
+        except Exception:
+            pass
+        raise ValueError("That window was closed")
+
+
+GWL_EXSTYLE = -20
+GW_OWNER = 4
+WS_EX_TOOLWINDOW = 0x80
+SHELL_CLASSES = frozenset({"Shell_TrayWnd", "Progman", "WorkerW", "Windows.UI.Core.CoreWindow",
+                           "ApplicationFrameWindow"})
+BROWSER_EXES = {"chrome.exe": "chrome", "msedge.exe": "msedge", "brave.exe": "brave"}
+OPEN_WINDOWS_LIMIT = 30
+FILE_NAME_IN_TITLE = re.compile(r"[^\\/:*?\"<>|\s][^\\/:*?\"<>|]*\.[A-Za-z0-9]{1,5}\b")
+
+
+def sendable_windows(infos, process_info, not_apps, limit=OPEN_WINDOWS_LIMIT, document_apps=frozenset()):
+    """Pure filter. infos: dicts in EnumWindows order; process_info(hwnd) -> (pid, exe)."""
+    windows = []
+    for info in infos:
+        if (not info["visible"] or info["cloaked"] or info["exStyle"] & WS_EX_TOOLWINDOW
+                or info["owner"] or not info["title"].strip() or info["className"] in SHELL_CLASSES):
+            continue
+        try:
+            pid, exe = process_info(info["hwnd"])
+        except Exception:
+            continue  # Closed, or a protected process we may not inspect.
+        if exe in BROWSER_EXES:
+            kind = "browser"
+        elif info["className"] == "CabinetWClass":
+            kind = "explorer"
+        elif exe and exe not in not_apps and (
+                exe in document_apps or exe == "notepad.exe" or FILE_NAME_IN_TITLE.search(info["title"])):
+            kind = "app"
+        else:
+            continue
+        windows.append({"hwnd": info["hwnd"], "pid": pid, "kind": kind, "app": exe, "title": info["title"]})
+        if len(windows) >= limit:
+            break
+    return windows
+
+
+def is_cloaked(hwnd: int) -> bool:
+    """Hidden by DWM (other virtual desktop, suspended Store app). Failure means not cloaked."""
+    try:
+        value = ctypes.c_int(0)
+        result = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            wintypes.HWND(hwnd), 14, ctypes.byref(value), ctypes.sizeof(value))  # DWMWA_CLOAKED
+        return result == 0 and value.value != 0
+    except Exception:
+        return False
+
+
+def window_pid(hwnd: int) -> int:
+    import win32process
+    return win32process.GetWindowThreadProcessId(hwnd)[1]
+
+
+def process_info(hwnd: int):
+    handle = window_process(hwnd)
+    try:
+        return window_pid(hwnd), process_exe(handle)
+    finally:
+        handle.Close()
+
 
 def window_process(hwnd: int):
     """Handle to the window's process; the caller must Close() it."""
     import win32api
-    import win32process
-    _, pid = win32process.GetWindowThreadProcessId(hwnd)
-    return win32api.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+    try:
+        pid = window_pid(hwnd)
+        if pid:
+            return win32api.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+    except Exception:
+        pass
+    raise ValueError("That window was closed")
 
 
 def process_exe(handle) -> str:
@@ -100,8 +199,7 @@ def process_exe(handle) -> str:
 def browser_for_window(hwnd: int) -> str:
     handle = window_process(hwnd)
     try:
-        return {"chrome.exe": "chrome", "msedge.exe": "msedge",
-                "brave.exe": "brave"}.get(process_exe(handle), "")
+        return BROWSER_EXES.get(process_exe(handle), "")
     finally:
         handle.Close()
 
@@ -125,7 +223,7 @@ def read_browser_tab(hwnd: int) -> dict:
     started = time.monotonic()
     browser = browser_for_window(hwnd)
     if not browser:
-        raise ValueError("Foreground window is not Chrome, Edge, or Brave")
+        raise ValueError("That window is not Chrome, Edge, or Brave")
     with auto.UIAutomationInitializerInThread():
         root = auto.ControlFromHandle(hwnd)
         tabs, edits, document_urls = [], [], []

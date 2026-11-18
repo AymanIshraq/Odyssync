@@ -338,14 +338,21 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
     PATHS.forEach((path) => transport.sendToServer(path, { type: 'KICK_MEMBER', targetDeviceId }));
   }
 
-  // The "Send tab" button: our last-used browser tab opens on that laptop (ours stays open).
-  function sendDirect(targetDeviceId) {
+  // Right-click on a person: the list of what is open here that can be sent to them.
+  function listSendable(targetDeviceId) {
     if (!room) return Promise.resolve({ ok: false, error: 'You are not in a room' });
-    return handoff.sendDirect(targetDeviceId);
+    return handoff.listSendable(targetDeviceId);
+  }
+
+  // The picked item ({ deviceId, itemId }) goes to that laptop; ours stays open.
+  function sendDirect(arg) {
+    if (!room) return Promise.resolve({ ok: false, error: 'You are not in a room' });
+    const { deviceId, itemId } = arg || {};
+    return handoff.sendDirect(deviceId, itemId);
   }
 
   return {
-    createRoom, joinRoom, leaveRoom, setLayout, setMode, kick, sendDirect, getState,
+    createRoom, joinRoom, leaveRoom, setLayout, setMode, kick, listSendable, sendDirect, getState,
     onState: (cb) => { stateListeners.push(cb); cb(getState()); },
     onNotice: (cb) => { noticeListeners.push(cb); },
   };
@@ -361,7 +368,7 @@ function wireIpc(ipcMain, getControlWindow, manager) {
   manager.onState(push('room:state'));
   manager.onNotice(push('room:notice'));
   ipcMain.handle('room:getState', () => manager.getState());
-  for (const name of ['createRoom', 'joinRoom', 'leaveRoom', 'setLayout', 'setMode', 'kick', 'sendDirect']) {
+  for (const name of ['createRoom', 'joinRoom', 'leaveRoom', 'setLayout', 'setMode', 'kick', 'listSendable', 'sendDirect']) {
     ipcMain.handle('room:' + name, (event, arg) => manager[name](arg));
   }
 }

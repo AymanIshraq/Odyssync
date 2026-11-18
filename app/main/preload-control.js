@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('odyssync', {
   setLayout: call('setLayout'),
   setMode: call('setMode'),
   kick: call('kick'),
+  listSendable: call('listSendable'),
   sendDirect: call('sendDirect'),
 
   // Every new state, plus the current one right away so the page can draw.

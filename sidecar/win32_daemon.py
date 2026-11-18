@@ -16,7 +16,7 @@ if __package__ in (None, ""):
 from sidecar.documents import DocumentReadError, read_dragged_window
 from sidecar.drag import DragTracker, FileDragTracker
 from sidecar.handoff import WindowController
-from sidecar.lookups import lookup_reply
+from sidecar.lookups import lookup_reply, open_windows_reply, window_item_reply
 from sidecar.notepad import clear_snapshots
 from sidecar.preview import capture_preview
 from sidecar.windows import WindowsDesktop, enable_dpi_awareness, warm_browser_worker
@@ -60,10 +60,25 @@ class LookupReader(BrowserReader):
     """Separate bounded voice worker; a blocked lookup cannot delay restoration."""
 
     def submit(self, kind, hwnd):
+        return self.call(lookup_reply, kind, hwnd)
+
+    def call(self, function, *args):
         if self.pending is not None and not self.pending.done():
             return None
-        self.pending = self.executor.submit(lookup_reply, kind, hwnd)
+        self.pending = self.executor.submit(function, *args)
         return asyncio.wrap_future(self.pending)
+
+    def abandon(self):
+        """A native call is hung and Python cannot interrupt it. Leave that thread
+        behind and continue on a fresh, warmed worker so later lookups still run."""
+        if self.pending is None or self.pending.done():
+            return
+        old, self.executor = self.executor, ThreadPoolExecutor(max_workers=1, thread_name_prefix="lookup")
+        self.pending = None
+        old.shutdown(wait=False, cancel_futures=True)
+        # Same warm step as startup; it queues ahead of the next lookup on this worker.
+        warmed = self.executor.submit(warm_browser_worker)
+        warmed.add_done_callback(lambda future: future.exception())
 
 
 class Outbox:
@@ -146,23 +161,37 @@ async def command_stream(socket, active, controller, outbox, executor, stopped, 
             elif message.get("type") in ("GET_ACTIVE_TAB", "GET_SELECTED_FILE"):
                 kind = message["type"]
                 reply_type = "ACTIVE_TAB" if kind == "GET_ACTIVE_TAB" else "SELECTED_FILE"
-                pending_lookup = None
-                try:
+
+                def start(kind=kind):
                     if desktop is None or lookups is None or outbox is None:
                         raise ValueError("Voice lookup handler is unavailable")
-                    hwnd = desktop.remembered_window(kind == "GET_ACTIVE_TAB")
-                    pending_lookup = lookups.submit(kind, hwnd)
-                    if pending_lookup is None:
-                        raise RuntimeError("Previous voice lookup is still busy; try again")
-                    result = await asyncio.wait_for(asyncio.shield(pending_lookup), 1.5)
-                except TimeoutError:
-                    result = {"type": reply_type, "error": "Window lookup timed out; try again"}
-                except Exception as error:
-                    result = {"type": reply_type, "error": str(error)}
-                finally:
-                    if pending_lookup is not None:
-                        pending_lookup.add_done_callback(
-                            lambda future: None if future.cancelled() else future.exception())
+                    return lookups.submit(kind, desktop.remembered_window(kind == "GET_ACTIVE_TAB"))
+
+                result = await answer_lookup(lookups, start, {"type": reply_type}, 1.5,
+                                             "Window lookup timed out; try again")
+                if outbox is not None:
+                    outbox.put(result)
+            elif message.get("type") == "LIST_OPEN_WINDOWS":
+                def start():
+                    if desktop is None or lookups is None or outbox is None:
+                        raise ValueError("Window list handler is unavailable")
+                    return lookups.call(open_windows_reply, desktop)
+
+                result = await answer_lookup(lookups, start, {"type": "OPEN_WINDOWS"}, 2.0,
+                                             "Listing open windows timed out; try again", "Could not list open windows")
+                if outbox is not None:
+                    outbox.put(result)
+            elif message.get("type") == "GET_WINDOW_ITEM":
+                hwnd = message.get("hwnd")
+
+                def start(hwnd=hwnd):
+                    if desktop is None or lookups is None or outbox is None:
+                        raise ValueError("Window read handler is unavailable")
+                    class_name = desktop.listed_window(hwnd)
+                    return lookups.call(window_item_reply, hwnd, class_name)
+
+                result = await answer_lookup(lookups, start, {"type": "WINDOW_ITEM", "hwnd": hwnd}, 1.5,
+                                             "Reading that window timed out; try again", "Could not read that window")
                 if outbox is not None:
                     outbox.put(result)
             elif message.get("type") in ("HIDE_WINDOW", "SHOW_WINDOW", "CLOSE_WINDOW", "OPEN_URL", "OPEN_FILE",
@@ -193,6 +222,29 @@ async def command_stream(socket, active, controller, outbox, executor, stopped, 
                 log.warning("Command not implemented: %s", message.get("type"))
         except (ValueError, TypeError, UnicodeError):
             log.warning("Ignoring malformed bridge command", exc_info=True)
+
+
+async def answer_lookup(lookups, start, reply, seconds, timeout_error, fallback=None):
+    """Run one lookup on the bounded worker; every failure becomes `reply` plus `error`.
+
+    fallback: sentence used instead of non-ValueError text (e.g. raw pywintypes tuples).
+    """
+    pending_lookup = None
+    try:
+        pending_lookup = start()
+        if pending_lookup is None:
+            raise ValueError("A previous lookup is still busy; try again")
+        return await asyncio.wait_for(asyncio.shield(pending_lookup), seconds)
+    except TimeoutError:
+        if lookups is not None:
+            lookups.abandon()  # Never let a hung native call block every later lookup.
+        return {**reply, "error": timeout_error}
+    except Exception as error:
+        return {**reply, "error": str(error) if fallback is None or isinstance(error, ValueError) else fallback}
+    finally:
+        if pending_lookup is not None:
+            pending_lookup.add_done_callback(
+                lambda future: None if future.cancelled() else future.exception())
 
 
 async def poll_desktop(desktop, active, outbox, reader, previews=None, documents=None):

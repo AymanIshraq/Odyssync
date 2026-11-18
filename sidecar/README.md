@@ -281,6 +281,32 @@ queued behind; a later request receives a busy error until it finishes.
 - These request/reply messages have no request IDs in the contract. Tech 2
   must serialize outstanding requests of the same type and match the reply
   type; successful lookup is not confirmation that a transfer succeeded.
+- If a lookup times out while its native call is still running, the worker is
+  abandoned (left to finish on its own thread) and a fresh warmed worker takes
+  over, so one hung call cannot block every later lookup. Windows 11 Explorer
+  tabs share one handle: the one tab with exactly one selected item is used.
+
+### Control Center window picker
+
+These share the lookup worker above (busy, timeout and abandon rules apply).
+
+- `LIST_OPEN_WINDOWS` replies within 2 s with
+  `OPEN_WINDOWS {windows: [{hwnd, kind, app, title, name?}]}` or
+  `OPEN_WINDOWS {error}`. Order is topmost first, at most 30. `kind` is
+  `browser`, `explorer` or `app`; `app` is the lower-case exe name. Visible,
+  uncloaked, unowned, non-tool windows with a title are listed; minimised
+  windows are included; the taskbar/desktop/UWP frame classes and Odyssync
+  itself are not. Explorer windows are listed only when exactly one regular
+  file is selected, with `name` set to that file's name. Only titles and exe
+  names are read while listing.
+- `GET_WINDOW_ITEM {hwnd}` reads one window from the last list without
+  bringing it forward (1.5 s). The handle must be in that list and still owned
+  by the same process, otherwise `WINDOW_ITEM {hwnd, error}`. Replies:
+  `WINDOW_ITEM {hwnd, kind: "tab", url, title, browser, tabCount}`,
+  `WINDOW_ITEM {hwnd, kind: "file", path, name, size}`,
+  `WINDOW_ITEM {hwnd, kind: "document", path, title, app, keepSource?}`, or
+  `WINDOW_ITEM {hwnd, error}`. Errors are short sentences without paths;
+  unexpected failures read "Could not read that window".
 
 `LOCAL_FILE_DRAG {active, edge}` follows the plan's heuristic: left button
 held, foreground class `CabinetWClass`, `Progman`, or `WorkerW`, and cursor
