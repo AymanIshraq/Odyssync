@@ -326,3 +326,55 @@ test('send: unreachable laptop and helper timeout', async t => {
   const { a: a2 } = pair(t);
   assert.deepEqual(await a2.handoff.sendDirect('b', '1'), { ok: false, error: 'Could not read that window' });
 });
+
+// ---------- voice: what is open now ----------
+
+const current = (reply) => (m) => (m.type === 'GET_CURRENT_ITEM' && reply ? { type: 'CURRENT_ITEM', ...reply } : null);
+
+test('readCurrent: tab, document, files, error, timeout', async t => {
+  let reply = { kind: 'tab', url: 'https://example.com/', title: 'Example', browser: 'chrome', tabCount: 2 };
+  const { a } = pair(t, { sidecar: m => current(reply)(m) });
+  assert.deepEqual(await a.handoff.readCurrent(), { ok: true, label: 'Example',
+    items: [{ kind: 'tab', url: 'https://example.com/', title: 'Example', browser: 'chrome' }] });
+  assert.equal(a.commands[0].type, 'GET_CURRENT_ITEM');
+  reply = { kind: 'document', path: 'C:\\Users\\me\\notes.txt', title: 'notes.txt - Notepad', app: 'notepad.exe' };
+  assert.deepEqual(await a.handoff.readCurrent(), { ok: true, label: 'notes.txt',
+    items: [{ kind: 'document', path: 'C:\\Users\\me\\notes.txt', title: 'notes.txt - Notepad', app: 'notepad.exe' }] });
+  reply = { kind: 'files', where: 'explorer', files: [{ path: 'C:\\d\\a.png', name: 'a.png', size: 1 }, { path: 'C:\\d\\b.pdf', name: 'b.pdf', size: 2 }] };
+  assert.deepEqual(await a.handoff.readCurrent(), { ok: true, label: '2 files',
+    items: [{ kind: 'file', path: 'C:\\d\\a.png', name: 'a.png' }, { kind: 'file', path: 'C:\\d\\b.pdf', name: 'b.pdf' }] });
+  reply = { error: 'Nothing is open' };
+  assert.deepEqual(await a.handoff.readCurrent(), { ok: false, error: 'Nothing is open' });
+  reply = null;
+  assert.deepEqual(await a.handoff.readCurrent(), { ok: false, error: 'Could not read what is open' });
+});
+
+test('readCurrent: busy', async t => {
+  const { a } = pair(t, { sidecar: current({ kind: 'tab', url: 'https://e.com/', title: 'E', browser: 'chrome', tabCount: 1 }) });
+  const first = a.handoff.readCurrent();
+  assert.deepEqual(await a.handoff.readCurrent(), { ok: false, error: 'Still working on your last send' });
+  assert.equal((await first).ok, true);
+});
+
+test('sendItems: two items in order with counts', async t => {
+  const { a, b, file } = pair(t);
+  const r = await a.handoff.sendItems('b', [
+    { kind: 'tab', url: 'https://example.com/', title: 'Example', browser: 'chrome' },
+    { kind: 'file', path: file, name: 'draft.txt' },
+  ]);
+  assert.deepEqual(r, { ok: true, sent: 2, total: 2, what: 'items', error: undefined });
+  const commits = b.received.filter(c => c.type === 'TRANSFER_COMMIT');
+  assert.deepEqual(commits.map(c => c.kind), ['tab', 'file']);
+  assert.deepEqual(fs.readFileSync(b.revealed[0]), fs.readFileSync(file));
+  const bad = await a.handoff.sendItems('b', [{ kind: 'tab', url: 'javascript:x' }, { kind: 'tab', url: 'https://e.com/' }]);
+  assert.deepEqual(bad, { ok: false, sent: 1, total: 2, what: 'items', error: "This tab can't be sent" });
+});
+
+test('sendCurrent: reads then sends a selected file', async t => {
+  let file;
+  const { a, b, file: f } = pair(t, { sidecar: m => current({ kind: 'files', where: 'desktop', files: [{ path: file, name: 'draft.txt', size: 5 }] })(m) });
+  file = f;
+  assert.deepEqual(await a.handoff.sendCurrent('b'), { ok: true, sent: 1, total: 1, what: 'file', error: undefined });
+  assert.deepEqual(fs.readFileSync(b.revealed[0]), fs.readFileSync(file));
+  noWindowCommands(a);
+});

@@ -416,6 +416,12 @@ function createHandoff(ctx) {
     if (!itemId || !Number.isFinite(hwnd)) return { ok: false, error: 'Could not read that window' };
     const item = await ask({ type: 'GET_WINDOW_ITEM', hwnd, ...(name ? { name } : {}) }, 'WINDOW_ITEM', 'Could not read that window');
     if (item.error !== undefined) return { ok: false, error: errorText(item, 'Could not read that window') };
+    return sendItem(target, item);
+  }
+
+  // Send one item ({ kind: 'tab', url, title, browser } | { kind: 'document', path, title, app } | { kind: 'file', path, name }).
+  // Always resolves: { ok: true, what } once it arrived there, else { ok: false, error }.
+  async function sendItem(target, item) {
     if (!isMember(target)) return { ok: false, error: 'That laptop is not in the room' };
     if (modeOf(target) === 'focus') return { ok: false, error: nameOf(target) + ' is in Focus mode' };
     let filePath = item.path;
@@ -439,6 +445,39 @@ function createHandoff(ctx) {
       ? { kind: 'file', open: true, ...(item.kind === 'document' && DOCUMENT_APPS.has(item.app) ? { app: item.app } : {}), ...(item.kind === 'tab' && item.browser ? { browser: item.browser } : {}), width: 1280, height: 800, filename, size: read.bytes.length, title: item.title }
       : { kind: 'file', width: 320, height: 200, filename, size: read.bytes.length, title: item.name || filename };
     return commitDirect(target, what, fields, read.bytes);
+  }
+
+  // What the user is looking at now, as items for sendItem plus a short spoken name.
+  // Always resolves: { ok: true, items, label } or { ok: false, error }.
+  async function readCurrent() {
+    if (!bridge.isConnected()) return { ok: false, error: 'Odyssync\'s Windows helper is not running' };
+    if (lookup) return { ok: false, error: 'Still working on your last send' };
+    const msg = await ask({ type: 'GET_CURRENT_ITEM' }, 'CURRENT_ITEM', 'Could not read what is open');
+    if (msg.error !== undefined) return { ok: false, error: errorText(msg, 'Could not read what is open') };
+    if (msg.kind === 'tab') return { ok: true, items: [{ kind: 'tab', url: msg.url, title: msg.title, browser: msg.browser }], label: String(msg.title || 'this tab') };
+    if (msg.kind === 'document') return { ok: true, items: [{ kind: 'document', path: msg.path, title: msg.title, app: msg.app }], label: path.win32.basename(String(msg.path || '')) || 'this document' };
+    const files = msg.kind === 'files' && Array.isArray(msg.files) ? msg.files : [];
+    if (!files.length) return { ok: false, error: 'Open a browser tab, document or File Explorer window first' };
+    const items = files.map((f) => ({ kind: 'file', path: f.path, name: f.name || path.win32.basename(String(f.path || '')) }));
+    return { ok: true, items, label: items.length === 1 ? items[0].name : items.length + ' files' };
+  }
+
+  // Send items one after another. Always resolves: { ok, sent, total, what, error }.
+  async function sendItems(target, items) {
+    const list = Array.isArray(items) ? items : [];
+    let sent = 0, error, what = 'items';
+    for (const item of list) {
+      const r = await sendItem(target, item);
+      if (r.ok) { sent++; what = r.what; } else if (!error) error = r.error;
+    }
+    if (list.length !== 1) what = 'items';
+    return { ok: sent === list.length, sent, total: list.length, what, error };
+  }
+
+  // Send what the user is looking at now to this member.
+  async function sendCurrent(target) {
+    const cur = await readCurrent();
+    return cur.ok ? sendItems(target, cur.items) : cur;
   }
 
   // Commit a direct send (and a file's bytes); it then waits in `waiting` like any transfer.
@@ -813,7 +852,8 @@ function createHandoff(ctx) {
       case 'LOCAL_DRAG_END': return onDragEnd(msg);
       case 'LOCAL_FILE_DRAG': return onFileDrag(msg);
       case 'OPEN_WINDOWS':
-      case 'WINDOW_ITEM': return onLookupAnswer(msg);
+      case 'WINDOW_ITEM':
+      case 'CURRENT_ITEM': return onLookupAnswer(msg);
       case 'WINDOW_PLACED': {
         const r = incoming.get(msg.transferId);
         if (r && r.stage === 'opening') endIncoming(r, 'PLACED', { type: 'TRANSFER_ACCEPTED' });
@@ -850,7 +890,7 @@ function createHandoff(ctx) {
     }
   }
 
-  return { onPeerMessage, roomChanged, listSendable, sendDirect };
+  return { onPeerMessage, roomChanged, listSendable, sendDirect, readCurrent, sendItems, sendCurrent };
 }
 
 module.exports = { createHandoff };

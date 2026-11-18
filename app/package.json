@@ -1,6 +1,6 @@
 {
   "name": "odyssync",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Share browser windows between Windows laptops",
   "author": "Odyssync",
@@ -12,6 +12,9 @@
     "test:packaging": "node --test main/sidecar-launch.test.cjs"
   },
   "dependencies": {
+    "@elevenlabs/client": "1.33.0",
+    "@picovoice/porcupine-web": "4.0.1",
+    "@picovoice/web-voice-processor": "4.0.10",
     "ws": "^8.23.0"
   },
   "devDependencies": {

@@ -2,7 +2,7 @@
 
 Last updated: 2026-11-15
 
-**Overall: about 30.4% built. About 69.6% left.** Four people (two tech, two UI); 16 hours remained when planning began.
+**Overall: about 35.2% built. About 64.8% left.** Four people (two tech, two UI); 16 hours remained when planning began.
 
 Percentages are each component's share of all the work. Every tier is in scope.
 
@@ -72,5 +72,5 @@ percentages below remain at 0% accepted (100% acceptance work remains).
 
 | # | Component | Track | Share | Done |
 |---|---|---|---|---|
-| 19 | Voice window, hotkey, ElevenLabs session, tab/mode/members tools | first free tech | 4% | 0% |
-| 20 | Wake phrase, file tool, overlay indicator | first free tech, U2 | 2% | 0% |
+| 19 | Voice window, hotkey, ElevenLabs session, tab/mode/members tools | first free tech | 4% | 80% (built and tested on a Mac: wake phrase "Hey Odyssync" (Picovoice, on-device), Ctrl+Alt+Space, ElevenLabs voice with a free Groq LLM as the brain, tools list_members/set_mode/send_current/show_send_menu/send_items, floating Select-to-send menu, people picker and Siri-like orb on the overlay, app keeps running in the tray; NOT yet run on Windows and needs the user's Groq, ElevenLabs and Picovoice setup, see app/voice/README.md) |
+| 20 | Wake phrase, file tool, overlay indicator | first free tech, U2 | 2% | 80% (built and tested on a Mac: wake phrase "Hey Odyssync" (Picovoice, on-device), Ctrl+Alt+Space, ElevenLabs voice with a free Groq LLM as the brain, tools list_members/set_mode/send_current/show_send_menu/send_items, floating Select-to-send menu, people picker and Siri-like orb on the overlay, app keeps running in the tray; NOT yet run on Windows and needs the user's Groq, ElevenLabs and Picovoice setup, see app/voice/README.md) |

@@ -10,11 +10,14 @@ const bezel = OverlayBezel.createBezel({
   document,
   viewport: () => ({ width: innerWidth, height: innerHeight }),
 });
+// The Approval card and the send menu both may want clicks; main hears the combined answer.
+const wantClicks = OverlaySendMenu.combineInteractive(window.odyssync);
 const approval = OverlayApproval.createApproval({
   document, viewport: () => ({ width: innerWidth, height: innerHeight }),
-  api: window.odyssync, ghosts,
+  api: { answer: (id, accepted) => window.odyssync.answer(id, accepted), setInteractive: wantClicks('approval') }, ghosts,
 });
 const voice = OverlayVoice.createVoice({ document });
+const sendMenu = OverlaySendMenu.createSendMenu({ document, api: window.odyssync, setInteractive: wantClicks('sendMenu') });
 const dropStrip = OverlayDropStrip.createDropStrip({ document, viewport: () => ({ width: innerWidth, height: innerHeight }), api: window.odyssync });
 window.addEventListener('mousemove', approval.move);
 window.addEventListener('mouseleave', approval.leave);
@@ -26,6 +29,7 @@ window.odyssync.onEvent(event => {
   approval.receive(event);
   voice.receive(event);
   dropStrip.receive(event);
+  sendMenu.receive(event);
 });
 function frame(now) {
   ghosts.frame(now);

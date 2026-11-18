@@ -324,6 +324,22 @@ These share the lookup worker above (busy, timeout and abandon rules apply).
   `WINDOW_ITEM {hwnd, kind: "document", path, title, app, keepSource?}`, or
   `WINDOW_ITEM {hwnd, error}`. Errors are short sentences without paths;
   unexpected failures read "Could not read that window".
+- `GET_CURRENT_ITEM` reads what the user is looking at (1.5 s, same worker,
+  timeout and abandon rules as `GET_WINDOW_ITEM`). The helper remembers the
+  last window brought to the foreground, checked only when the foreground
+  changes. Odyssync/Electron windows, the taskbar, Start menu, empty
+  `ApplicationFrameWindow`s, other explorer.exe pop-ups and invisible windows
+  are skipped, so the hidden voice windows never replace it; File Explorer and
+  the Desktop are remembered. Replies:
+  `CURRENT_ITEM {kind: "tab", url, title, browser, tabCount}`,
+  `CURRENT_ITEM {kind: "files", where: "explorer" | "desktop", files: [{path, name, size}]}`
+  (all selected regular files, every Explorer tab of that window, at most 20;
+  none gives "No file is selected in File Explorer" / "No file is selected on
+  the Desktop"),
+  `CURRENT_ITEM {kind: "document", path, title, app, keepSource?}`, or
+  `CURRENT_ITEM {error}`. No remembered window, or one that closed or now
+  belongs to another process, gives "Open the tab or file you want to send
+  first"; unexpected failures read "Could not read that window".
 
 `LOCAL_FILE_DRAG {active, edge}` follows the plan's heuristic: left button
 held, foreground class `CabinetWClass`, `Progman`, or `WorkerW`, and cursor

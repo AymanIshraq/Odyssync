@@ -16,7 +16,7 @@ if __package__ in (None, ""):
 from sidecar.documents import DocumentReadError, read_dragged_window
 from sidecar.drag import DragTracker, FileDragTracker
 from sidecar.handoff import WindowController
-from sidecar.lookups import lookup_reply, open_windows_reply, window_item_reply
+from sidecar.lookups import current_item_reply, lookup_reply, open_windows_reply, window_item_reply
 from sidecar.notepad import clear_snapshots
 from sidecar.preview import capture_preview
 from sidecar.windows import WindowsDesktop, enable_dpi_awareness, warm_browser_worker
@@ -193,6 +193,17 @@ async def command_stream(socket, active, controller, outbox, executor, stopped, 
 
                 reply = {"type": "WINDOW_ITEM", "hwnd": hwnd, **({"name": name} if name is not None else {})}
                 result = await answer_lookup(lookups, start, reply, 1.5,
+                                             "Reading that window timed out; try again", "Could not read that window")
+                if outbox is not None:
+                    outbox.put(result)
+            elif message.get("type") == "GET_CURRENT_ITEM":
+                def start():
+                    if desktop is None or lookups is None or outbox is None:
+                        raise ValueError("Window read handler is unavailable")
+                    hwnd, class_name = desktop.current_window()
+                    return lookups.call(current_item_reply, hwnd, class_name)
+
+                result = await answer_lookup(lookups, start, {"type": "CURRENT_ITEM"}, 1.5,
                                              "Reading that window timed out; try again", "Could not read that window")
                 if outbox is not None:
                     outbox.put(result)

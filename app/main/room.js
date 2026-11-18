@@ -351,8 +351,14 @@ function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge,
     return handoff.sendDirect(deviceId, itemId);
   }
 
+  // Voice assistant: what is open now, and sending items or it to a member (by deviceId).
+  const noRoom = () => Promise.resolve({ ok: false, error: 'You are not in a room' });
+  const readCurrent = () => (room ? handoff.readCurrent() : noRoom());
+  const sendItems = (deviceId, items) => (room ? handoff.sendItems(deviceId, items) : noRoom());
+  const sendCurrent = (deviceId) => (room ? handoff.sendCurrent(deviceId) : noRoom());
+
   return {
-    createRoom, joinRoom, leaveRoom, setLayout, setMode, kick, listSendable, sendDirect, getState,
+    createRoom, joinRoom, leaveRoom, setLayout, setMode, kick, listSendable, sendDirect, getState, readCurrent, sendItems, sendCurrent,
     onState: (cb) => { stateListeners.push(cb); cb(getState()); },
     onNotice: (cb) => { noticeListeners.push(cb); },
   };
@@ -395,6 +401,7 @@ function wireOverlay(ipcMain, getOverlayWindow) {
     onAnswer: (cb) => ipcMain.on('overlay:answer', (_e, transferId, accepted) => cb(transferId, accepted)),
     onGhostSettled: (cb) => ipcMain.on('overlay:ghostSettled', (_e, transferId, rect) => cb(transferId, rect)),
     onFileDropped: (cb) => ipcMain.on('overlay:fileDropped', (_e, edge, path, count) => cb(edge, path, count)),
+    onSendMenuAnswer: (cb) => ipcMain.on('overlay:sendMenuAnswer', (_e, requestId, answer) => cb(requestId, answer)), // voice menu: picked or null
     setDropMode: (on) => { dropMode = !!on; applyMouse(); },
   };
 }

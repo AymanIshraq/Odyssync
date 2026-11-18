@@ -27,6 +27,7 @@ class WindowsDesktop:
         self.last_browser = None
         self.last_explorer = None
         self.previous_foreground = None
+        self.last_user_window = None  # (hwnd, pid, class_name) the user last brought forward.
         self.listed = {}  # {hwnd: pid} from the last LIST_OPEN_WINDOWS reply.
 
     def screen_info(self):
@@ -48,14 +49,17 @@ class WindowsDesktop:
         class_name = self.gui.GetClassName(hwnd) if hwnd else ""
         if hwnd != self.previous_foreground:
             self.previous_foreground = hwnd
-            if class_name in ("Chrome_WidgetWin_1", "CabinetWClass"):
-                import win32process
+            if hwnd:
                 try:
-                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    # Exe lookup only on a foreground change, never every poll.
+                    pid, exe = process_info(hwnd)
                     if class_name == "CabinetWClass":
                         self.last_explorer = (hwnd, pid)
-                    elif browser_for_window(hwnd):
+                    elif class_name == "Chrome_WidgetWin_1" and exe in BROWSER_EXES:
                         self.last_browser = (hwnd, pid)
+                    if is_user_window(class_name, exe, self.gui.IsWindowVisible(hwnd),
+                                      self.gui.GetWindowText(hwnd)):
+                        self.last_user_window = (hwnd, pid, class_name)
                 except Exception:
                     log.debug("Foreground window vanished during lookup", exc_info=True)
         return Sample(hwnd, class_name == "Chrome_WidgetWin_1",
@@ -75,6 +79,19 @@ class WindowsDesktop:
                 or win32process.GetWindowThreadProcessId(hwnd)[1] != pid):
             raise ValueError(error)
         return hwnd
+
+    def current_window(self):
+        """(hwnd, class_name) of the window the user last brought forward, if still open."""
+        error = "Open the tab or file you want to send first"
+        if self.last_user_window is None:
+            raise ValueError(error)
+        hwnd, pid, class_name = self.last_user_window
+        try:
+            if self.gui.IsWindow(hwnd) and window_pid(hwnd) == pid:
+                return hwnd, class_name
+        except Exception:
+            pass
+        raise ValueError(error)
 
     def open_windows(self):
         """Every sendable top-level window, topmost first. Titles and exe names only."""
@@ -122,6 +139,27 @@ GW_OWNER = 4
 WS_EX_TOOLWINDOW = 0x80
 SHELL_CLASSES = frozenset({"Shell_TrayWnd", "Progman", "WorkerW", "Windows.UI.Core.CoreWindow",
                            "ApplicationFrameWindow"})
+ODYSSYNC_EXES = frozenset({"odyssync.exe", "electron.exe"})
+DESKTOP_CLASSES = ("Progman", "WorkerW")
+TASKBAR_CLASSES = frozenset({"Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow"})
+
+
+def is_user_window(class_name, exe, visible, title):
+    """Pure rule: should this new foreground window be remembered for GET_CURRENT_ITEM?
+
+    Odyssync's own windows, the taskbar, Start menu and other shell pop-ups are skipped.
+    The Desktop and File Explorer are remembered; other explorer.exe windows
+    (Alt+Tab, task view) are not.
+    """
+    if not visible or not exe or exe in ODYSSYNC_EXES or class_name in TASKBAR_CLASSES:
+        return False
+    if exe == "explorer.exe":
+        return class_name in DESKTOP_CLASSES or class_name == "CabinetWClass"
+    if class_name == "ApplicationFrameWindow":
+        return bool(title.strip())  # An empty frame hosts no app.
+    return True
+
+
 BROWSER_EXES = {"chrome.exe": "chrome", "msedge.exe": "msedge", "brave.exe": "brave"}
 OPEN_WINDOWS_LIMIT = 30
 FILE_NAME_IN_TITLE = re.compile(r"[^\\/:*?\"<>|\s][^\\/:*?\"<>|]*\.[A-Za-z0-9]{1,5}\b")

@@ -4,7 +4,8 @@ import ntpath
 from pathlib import Path
 import stat
 
-from sidecar.windows import OPEN_WINDOWS_LIMIT, browser_for_window, read_browser_tab, window_process
+from sidecar.windows import (DESKTOP_CLASSES, OPEN_WINDOWS_LIMIT, browser_for_window, read_browser_tab,
+                             window_process)
 
 AMBIGUOUS = "File Explorer selection is unavailable or ambiguous; use a separate Explorer window"
 
@@ -56,7 +57,6 @@ EXPLORER_FILES_LIMIT = 20
 NOT_SELECTED = "That file is no longer selected in File Explorer"
 NOT_ON_DESKTOP = "That file is no longer selected on the Desktop"
 TWO_TABS = "Two Explorer tabs have a file with this name; close one tab"
-DESKTOP_CLASSES = ("Progman", "WorkerW")
 SWC_DESKTOP = 8
 SWFO_NEEDDISPATCH = 1
 
@@ -285,3 +285,37 @@ def lookup_reply(kind, hwnd):
     except Exception as error:
         # The contract uses the same reply type with `error`, not a new message.
         return {"type": reply_type, "error": str(error)}
+
+
+def plain_files(files):
+    return [{key: value for key, value in file.items() if key != "clash"} for file in files]
+
+
+def current_item_reply(hwnd, class_name):
+    """Run on the lookup worker: what the user is looking at right now (voice "send this")."""
+    from sidecar.documents import read_window_document
+    base = {"type": "CURRENT_ITEM"}
+    try:
+        if class_name in DESKTOP_CLASSES:
+            files = plain_files(with_shell(desktop_files_from_shell))
+            if not files:
+                raise ValueError("No file is selected on the Desktop")
+            item = {"kind": "files", "where": "desktop", "files": files}
+        elif class_name == "CabinetWClass":
+            files = plain_files(with_shell(selected_files_from_shell, hwnd))
+            if not files:
+                raise ValueError("No file is selected in File Explorer")
+            item = {"kind": "files", "where": "explorer", "files": files}
+        elif browser_for_window(hwnd):
+            data = read_browser_tab(hwnd)
+            item = {"kind": "tab", "url": data["url"], "title": data["title"],
+                    "browser": data["browser"], "tabCount": data["tabCount"]}
+        else:
+            data = read_window_document(hwnd)
+            item = {"kind": "document", "path": data["path"], "title": data["title"], "app": data["app"],
+                    **({"keepSource": True} if data.get("keepSource") else {})}
+        return {**base, **item}
+    except ValueError as error:
+        return {**base, "error": str(error)}
+    except Exception:
+        return {**base, "error": "Could not read that window"}

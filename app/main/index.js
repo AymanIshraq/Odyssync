@@ -1,14 +1,19 @@
 // Electron entry: creates the Control Center window and the overlay window.
 const path = require('path');
-const { app, BrowserWindow, screen, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, screen, ipcMain, shell, globalShortcut, Tray, Menu, nativeImage } = require('electron');
 const sidecarBridge = require('./sidecar-bridge');
 const os = require('os');
 const room = require('./room');
+const { createVoice } = require('./voice');
 const config = require('../config.json');
 
 let controlWin = null;
 let overlayWin = null;
 let manager = null;
+let voice = null;
+let tray = null; // kept here so it is not thrown away
+let quitting = false; // true once the tidy-up has started
+let tidied = false; // true once it has finished: now the app may really quit
 
 function createControlWindow() {
   controlWin = new BrowserWindow({
@@ -18,8 +23,27 @@ function createControlWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload-control.js') },
   });
   controlWin.loadFile(path.join(__dirname, '..', 'control', 'index.html'));
-  // Closing the Control Center quits the app (the overlay cannot be closed by hand).
-  controlWin.on('closed', () => app.quit());
+  // Closing the Control Center only hides it: Odyssync keeps running in the tray
+  // (for the voice assistant). Quit from the tray menu really quits.
+  controlWin.on('close', (e) => { if (!quitting) { e.preventDefault(); controlWin.hide(); } });
+  controlWin.on('closed', () => { controlWin = null; });
+}
+
+function showControlWindow() {
+  if (!controlWin) createControlWindow();
+  controlWin.show();
+  controlWin.focus();
+}
+
+function createTray() {
+  const icon = nativeImage.createFromPath(path.join(__dirname, '..', 'control', 'assets', 'favicon.png')).resize({ width: 16, height: 16 });
+  tray = new Tray(icon);
+  tray.setToolTip('Odyssync');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Open Odyssync', click: showControlWindow },
+    { label: 'Quit', click: () => app.quit() },
+  ]));
+  tray.on('click', showControlWindow); // Windows: a left click opens it too
 }
 
 function createOverlayWindow() {
@@ -46,17 +70,21 @@ function createOverlayWindow() {
 app.whenReady().then(() => {
   const { size, scaleFactor } = screen.getPrimaryDisplay();
   const profile = { displayName: os.hostname(), screenWidth: size.width, screenHeight: size.height, dpiScale: scaleFactor };
-  manager = room.createRoomManager({ relayUrl: config.relayUrl, localPort: config.localPort, profile, bridge: sidecarBridge, overlay: room.wireOverlay(ipcMain, () => overlayWin), revealFile: (p) => shell.showItemInFolder(p), openFile: (p) => shell.openPath(p) });
+  const overlay = room.wireOverlay(ipcMain, () => overlayWin);
+  manager = room.createRoomManager({ relayUrl: config.relayUrl, localPort: config.localPort, profile, bridge: sidecarBridge, overlay, revealFile: (p) => shell.showItemInFolder(p), openFile: (p) => shell.openPath(p) });
   room.wireIpc(ipcMain, () => controlWin, manager);
   manager.onState((state) => sidecarBridge.setActiveEdges(room.activeEdges(state)));
   createControlWindow();
   createOverlayWindow();
+  createTray();
+  voice = createVoice({ manager, overlay, ipcMain, globalShortcut, BrowserWindow, appDir: path.join(__dirname, '..'), config, notify: (text) => console.log('[voice] ' + text) });
   sidecarBridge.start();
 });
 
-app.on('window-all-closed', () => app.quit());
-let quitting = false; // true once the tidy-up has started
-let tidied = false; // true once it has finished: now the app may really quit
+// Keep running with no window open (tray app); only Quit ends it.
+app.on('window-all-closed', () => {});
+app.on('activate', () => { if (manager) showControlWindow(); }); // Mac: clicking the dock icon
+app.on('will-quit', () => { if (voice) voice.stop(); });
 app.on('before-quit', (e) => {
   if (tidied) return;
   e.preventDefault(); // wait: the sidecar may need a moment to show hidden windows
@@ -70,4 +98,6 @@ app.on('before-quit', (e) => {
 module.exports = {
   getControlWindow: () => controlWin,
   getOverlayWindow: () => overlayWin,
+  getVoice: () => voice,
+  getTray: () => tray,
 };

@@ -5,19 +5,26 @@ const { createVoice } = require('./voice.js');
 function setup(pointer = () => null) {
   let now = 0;
   const nodes = [], settled = [];
-  const document = { body: { append(node) { nodes.push(node); } }, createElement: () => ({ style: {}, dataset: {}, children: [], setAttribute() {}, append(n) { this.children.push(n); }, remove() {} }) };
+  const document = { body: { append(node) { nodes.push(node); } }, createElement: () => ({ style: {}, dataset: {}, children: [], setAttribute() {}, append(...n) { this.children.push(...n); }, remove() {} }) };
   const ghosts = createGhosts({ document, viewport: () => ({ width: 1000, height: 700 }), pointer, clock: () => now, settled: (...args) => settled.push(args) });
   return { ghosts, document, nodes, settled, tick(t) { now = t; ghosts.frame(t); } };
 }
-test('voice reuses one passive indicator, validates states and hides on idle', () => {
+test('voice reuses one passive orb, validates states and hides on idle', () => {
   const s = setup(), voice = createVoice({ document: s.document });
   voice.receive({ type: 'VOICE', state: 'invalid' }); assert.equal(s.nodes.length, 0);
   for (const [state, label] of [['listening', 'Listening'], ['thinking', 'Thinking'], ['speaking', 'Speaking']]) {
     voice.receive({ type: 'VOICE', state });
-    assert.equal(s.nodes.length, 1); assert.equal(s.nodes[0].textContent, label);
+    assert.equal(s.nodes.length, 1); assert.equal(s.nodes[0].className, 'voice-orb'); assert.equal(voice.label(), label);
     assert.equal(s.nodes[0].dataset.state, state); assert.equal(s.nodes[0].hidden, false);
   }
   voice.receive({ type: 'VOICE', state: 'idle' }); assert.equal(s.nodes[0].hidden, true);
+});
+test('voice orb keeps a visually hidden aria-live label for screen readers', () => {
+  const s = setup(), voice = createVoice({ document: s.document });
+  voice.receive({ type: 'VOICE', state: 'listening' });
+  const label = s.nodes[0].children.find(n => n.className === 'visually-hidden');
+  assert.ok(label); assert.equal(label.textContent, 'Listening');
+  assert.equal(s.nodes[0].children.length, 3);
 });
 test('preview-free direct arrivals enter from each specified edge and settle once', () => {
   for (const edge of ['LEFT', 'RIGHT', 'TOP', 'BOTTOM']) {
