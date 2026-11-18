@@ -183,14 +183,16 @@ async def command_stream(socket, active, controller, outbox, executor, stopped, 
                     outbox.put(result)
             elif message.get("type") == "GET_WINDOW_ITEM":
                 hwnd = message.get("hwnd")
+                name = message.get("name")
 
-                def start(hwnd=hwnd):
+                def start(hwnd=hwnd, name=name):
                     if desktop is None or lookups is None or outbox is None:
                         raise ValueError("Window read handler is unavailable")
                     class_name = desktop.listed_window(hwnd)
-                    return lookups.call(window_item_reply, hwnd, class_name)
+                    return lookups.call(window_item_reply, hwnd, class_name, name)
 
-                result = await answer_lookup(lookups, start, {"type": "WINDOW_ITEM", "hwnd": hwnd}, 1.5,
+                reply = {"type": "WINDOW_ITEM", "hwnd": hwnd, **({"name": name} if name is not None else {})}
+                result = await answer_lookup(lookups, start, reply, 1.5,
                                              "Reading that window timed out; try again", "Could not read that window")
                 if outbox is not None:
                     outbox.put(result)

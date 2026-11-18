@@ -98,6 +98,13 @@ class WindowsDesktop:
         self.listed = {window["hwnd"]: window["pid"] for window in windows}
         return windows
 
+    def shell_window(self):
+        """(hwnd, pid) of the Desktop window (Progman), owned by explorer.exe."""
+        hwnd = self.gui.GetShellWindow()
+        if not hwnd:
+            raise ValueError("No Desktop window")
+        return hwnd, window_pid(hwnd)
+
     def listed_window(self, hwnd):
         """Class name of the picked window, only if it was offered and is still the same program."""
         if type(hwnd) is not int or hwnd not in self.listed:
@@ -121,8 +128,14 @@ FILE_NAME_IN_TITLE = re.compile(r"[^\\/:*?\"<>|\s][^\\/:*?\"<>|]*\.[A-Za-z0-9]{1
 
 
 def sendable_windows(infos, process_info, not_apps, limit=OPEN_WINDOWS_LIMIT, document_apps=frozenset()):
-    """Pure filter. infos: dicts in EnumWindows order; process_info(hwnd) -> (pid, exe)."""
+    """Pure filter. infos: dicts in EnumWindows order; process_info(hwnd) -> (pid, exe).
+
+    An unknown program with no file name in its title is kept with needsCheck: the
+    caller lists it only if its command line names the file (the swipe rule).
+    Those do not count toward the limit; at most `limit` of them are kept.
+    """
     windows = []
+    sure = unsure = 0
     for info in infos:
         if (not info["visible"] or info["cloaked"] or info["exStyle"] & WS_EX_TOOLWINDOW
                 or info["owner"] or not info["title"].strip() or info["className"] in SHELL_CLASSES):
@@ -135,13 +148,21 @@ def sendable_windows(infos, process_info, not_apps, limit=OPEN_WINDOWS_LIMIT, do
             kind = "browser"
         elif info["className"] == "CabinetWClass":
             kind = "explorer"
-        elif exe and exe not in not_apps and (
-                exe in document_apps or exe == "notepad.exe" or FILE_NAME_IN_TITLE.search(info["title"])):
+        elif exe and exe not in not_apps:
             kind = "app"
         else:
             continue
-        windows.append({"hwnd": info["hwnd"], "pid": pid, "kind": kind, "app": exe, "title": info["title"]})
-        if len(windows) >= limit:
+        window = {"hwnd": info["hwnd"], "pid": pid, "kind": kind, "app": exe, "title": info["title"]}
+        if kind == "app" and not (exe in document_apps or exe == "notepad.exe"
+                                  or FILE_NAME_IN_TITLE.search(info["title"])):
+            if unsure >= limit:
+                continue
+            unsure += 1
+            window["needsCheck"] = True
+        else:
+            sure += 1
+        windows.append(window)
+        if sure >= limit:
             break
     return windows
 

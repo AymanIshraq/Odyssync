@@ -291,19 +291,36 @@ queued behind; a later request receives a busy error until it finishes.
 These share the lookup worker above (busy, timeout and abandon rules apply).
 
 - `LIST_OPEN_WINDOWS` replies within 2 s with
-  `OPEN_WINDOWS {windows: [{hwnd, kind, app, title, name?}]}` or
+  `OPEN_WINDOWS {windows: [{hwnd, kind, app, title, names?, where?}]}` or
   `OPEN_WINDOWS {error}`. Order is topmost first, at most 30. `kind` is
   `browser`, `explorer` or `app`; `app` is the lower-case exe name. Visible,
   uncloaked, unowned, non-tool windows with a title are listed; minimised
   windows are included; the taskbar/desktop/UWP frame classes and Odyssync
-  itself are not. Explorer windows are listed only when exactly one regular
-  file is selected, with `name` set to that file's name. Only titles and exe
-  names are read while listing.
-- `GET_WINDOW_ITEM {hwnd}` reads one window from the last list without
+  itself are not. An `app` window is listed when it is Office, an editor,
+  Notepad, or its title shows a `name.ext`; any other program is listed only if
+  the swipe rule finds its file (its command line names one existing file that
+  the title also shows; read while listing, no COM; any failure leaves it out).
+  Explorer windows are listed only when at least one regular
+  file is selected, with `names` set to those file names (Explorer selection
+  order, at most 20; folders and virtual items skipped). Windows 11 tabs share
+  one handle: the selections of all its tabs are combined, one entry per file
+  name. Files selected on the Desktop add one last entry
+  `{hwnd: <GetShellWindow()>, kind: "explorer", where: "desktop", app: "explorer.exe", title: "Desktop", names}`
+  (same rules; `where` is sent only for the Desktop); if the Desktop cannot be
+  read the entry is left out without an error. Only titles, exe names, command
+  lines of unknown programs and Explorer/Desktop selections are read while
+  listing.
+- `GET_WINDOW_ITEM {hwnd, name?}` reads one window from the last list without
   bringing it forward (1.5 s). The handle must be in that list and still owned
   by the same process, otherwise `WINDOW_ITEM {hwnd, error}`. Replies:
   `WINDOW_ITEM {hwnd, kind: "tab", url, title, browser, tabCount}`,
-  `WINDOW_ITEM {hwnd, kind: "file", path, name, size}`,
+  `WINDOW_ITEM {hwnd, name, kind: "file", path, size}` (Explorer: `name` is
+  required and must still be selected, otherwise "Pick a file to send" or
+  "That file is no longer selected in File Explorer"; for the Desktop entry
+  "That file is no longer selected on the Desktop"; a name selected in two
+  Explorer tabs as different files gives "Two Explorer tabs have a file with
+  this name; close one tab"; `name`, when sent, is echoed in every reply
+  including errors),
   `WINDOW_ITEM {hwnd, kind: "document", path, title, app, keepSource?}`, or
   `WINDOW_ITEM {hwnd, error}`. Errors are short sentences without paths;
   unexpected failures read "Could not read that window".

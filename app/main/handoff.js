@@ -347,7 +347,7 @@ function createHandoff(ctx) {
   // Always resolves: the answer, or { error } (also when it took too long).
   function ask(request, answerType, timeoutError) {
     return new Promise((resolve) => {
-      const l = { type: answerType, hwnd: request.hwnd, timer: null };
+      const l = { type: answerType, hwnd: request.hwnd, name: request.name, timer: null };
       l.done = (msg) => { clearTimeout(l.timer); if (lookup === l) lookup = null; resolve(msg); };
       lookup = l; // before asking: a quick sidecar can answer at once
       l.timer = setTimeout(() => l.done({ error: timeoutError }), times.lookup);
@@ -358,7 +358,7 @@ function createHandoff(ctx) {
   // Our sidecar's OPEN_WINDOWS or WINDOW_ITEM: hand it to the question that waits for it.
   function onLookupAnswer(msg) {
     const l = lookup;
-    if (!l || l.type !== msg.type || (msg.type === 'WINDOW_ITEM' && msg.hwnd !== l.hwnd)) return;
+    if (!l || l.type !== msg.type || (msg.type === 'WINDOW_ITEM' && (msg.hwnd !== l.hwnd || (l.name && msg.name !== l.name)))) return;
     l.done(msg);
   }
 
@@ -368,10 +368,11 @@ function createHandoff(ctx) {
   const TITLE_END = / - (Google Chrome|Microsoft​? Edge|Brave|Notepad|Word|Excel|PowerPoint|Visual Studio Code|Cursor)$/;
 
   // One open window as a row of the "Select to send" list.
-  function listItem(w) {
+  // An explorer window is listed once per selected file: pass that file's name.
+  function listItem(w, fileName) {
     const app = String(w.app || '').toLowerCase();
     let name;
-    if (w.kind === 'explorer') name = String(w.name || '');
+    if (w.kind === 'explorer') name = String(fileName || '');
     else {
       name = String(w.title || '').replace(TITLE_END, '').replace(/^(● |\*)/, '');
       if (EDITORS.has(app)) name = name.split(' - ')[0]; // "file.js - project" -> "file.js"
@@ -381,10 +382,11 @@ function createHandoff(ctx) {
     const exe = app.replace(/\.exe$/, '');
     let detail;
     if (w.kind === 'browser') detail = (BROWSERS[app] || exe) + ' tab';
-    else if (w.kind === 'explorer') detail = 'Selected in File Explorer';
+    else if (w.kind === 'explorer') detail = w.where === 'desktop' ? 'Selected on the Desktop' : 'Selected in File Explorer';
     else detail = 'Open in ' + (APP_NAMES[app] || exe);
     const kind = w.kind === 'browser' ? 'tab' : w.kind === 'explorer' ? 'file' : 'document';
-    return { id: w.hwnd, kind, badge, name: name || detail, detail };
+    const id = w.kind === 'explorer' ? `${w.hwnd}/${name}` : String(w.hwnd);
+    return { id, kind, badge, name: name || detail, detail };
   }
 
   // What is open on this laptop that could go to this member.
@@ -394,7 +396,9 @@ function createHandoff(ctx) {
     if (no) return { ok: false, error: no };
     const msg = await ask({ type: 'LIST_OPEN_WINDOWS' }, 'OPEN_WINDOWS', 'Could not read your open windows');
     if (msg.error !== undefined) return { ok: false, error: errorText(msg, 'Could not read your open windows') };
-    const items = (Array.isArray(msg.windows) ? msg.windows : []).map(listItem);
+    const items = (Array.isArray(msg.windows) ? msg.windows : []).flatMap((w) => (
+      w.kind === 'explorer' ? (Array.isArray(w.names) ? w.names : []).map((n) => listItem(w, n)) : [listItem(w)]
+    ));
     if (!items.length) return { ok: false, error: 'Open a browser tab, document or File Explorer window first' };
     return { ok: true, items };
   }
@@ -404,7 +408,13 @@ function createHandoff(ctx) {
   async function sendDirect(target, itemId) {
     const no = cannotSend(target);
     if (no) return { ok: false, error: no };
-    const item = await ask({ type: 'GET_WINDOW_ITEM', hwnd: itemId }, 'WINDOW_ITEM', 'Could not read that window');
+    // itemId is "hwnd" or "hwnd/file name" (split at the first slash only).
+    if (typeof itemId !== 'string') return { ok: false, error: 'Could not read that window' };
+    const slash = itemId.indexOf('/');
+    const hwnd = Number(slash < 0 ? itemId : itemId.slice(0, slash));
+    const name = slash < 0 ? '' : itemId.slice(slash + 1);
+    if (!itemId || !Number.isFinite(hwnd)) return { ok: false, error: 'Could not read that window' };
+    const item = await ask({ type: 'GET_WINDOW_ITEM', hwnd, ...(name ? { name } : {}) }, 'WINDOW_ITEM', 'Could not read that window');
     if (item.error !== undefined) return { ok: false, error: errorText(item, 'Could not read that window') };
     if (!isMember(target)) return { ok: false, error: 'That laptop is not in the room' };
     if (modeOf(target) === 'focus') return { ok: false, error: nameOf(target) + ' is in Focus mode' };
@@ -412,10 +422,10 @@ function createHandoff(ctx) {
     let what = item.kind;
     if (item.kind === 'tab') {
       const u = typeof item.url === 'string' ? item.url : '';
-      if (/^https?:\/\//i.test(u)) {
+      if (/^(https?:\/\/|chrome:\/\/|edge:\/\/|brave:\/\/|about:)/i.test(u)) {
         return commitDirect(target, 'tab', { kind: 'tab', width: 1280, height: 800, url: u, title: item.title, browser: item.browser });
       }
-      if (!/^file:/i.test(u)) return { ok: false, error: 'Only web pages can be sent this way' };
+      if (!/^file:/i.test(u)) return { ok: false, error: "This tab can't be sent" };
       try { filePath = url.fileURLToPath(u, { windows: true }); } catch { return { ok: false, error: 'Could not read that file' }; }
       what = 'document';
     } else if (item.kind !== 'document' && item.kind !== 'file') {

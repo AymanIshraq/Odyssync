@@ -167,7 +167,7 @@ const WINDOWS = [
   { hwnd: 2, kind: 'app', app: 'notepad.exe', title: 'notes.txt - Notepad' },
   { hwnd: 3, kind: 'app', app: 'winword.exe', title: 'Report.docx - Word' },
   { hwnd: 4, kind: 'app', app: 'code.exe', title: '● app.js - proj - Visual Studio Code' },
-  { hwnd: 5, kind: 'explorer', app: 'explorer.exe', title: 'Downloads', name: 'photo.png' },
+  { hwnd: 13, kind: 'explorer', app: 'explorer.exe', title: 'Downloads', names: ['photo.png', 'notes.pdf'] },
   { hwnd: 6, kind: 'app', app: 'acrord32.exe', title: 'Adobe Acrobat Reader' },
   { hwnd: 7, kind: 'browser', app: 'chrome.exe', title: 'Node.js - Google Chrome' },
 ];
@@ -181,15 +181,24 @@ test('list maps open windows to names, badges and details', async t => {
   const r = await a.handoff.listSendable('b');
   assert.equal(r.ok, true);
   assert.deepEqual(r.items, [
-    { id: 1, kind: 'tab', badge: 'WEB', name: 'Example Domain', detail: 'Chrome tab' },
-    { id: 2, kind: 'document', badge: 'TXT', name: 'notes.txt', detail: 'Open in Notepad' },
-    { id: 3, kind: 'document', badge: 'DOCX', name: 'Report.docx', detail: 'Open in Word' },
-    { id: 4, kind: 'document', badge: 'JS', name: 'app.js', detail: 'Open in VS Code' },
-    { id: 5, kind: 'file', badge: 'PNG', name: 'photo.png', detail: 'Selected in File Explorer' },
-    { id: 6, kind: 'document', badge: 'FILE', name: 'Adobe Acrobat Reader', detail: 'Open in acrord32' },
-    { id: 7, kind: 'tab', badge: 'WEB', name: 'Node.js', detail: 'Chrome tab' },
+    { id: '1', kind: 'tab', badge: 'WEB', name: 'Example Domain', detail: 'Chrome tab' },
+    { id: '2', kind: 'document', badge: 'TXT', name: 'notes.txt', detail: 'Open in Notepad' },
+    { id: '3', kind: 'document', badge: 'DOCX', name: 'Report.docx', detail: 'Open in Word' },
+    { id: '4', kind: 'document', badge: 'JS', name: 'app.js', detail: 'Open in VS Code' },
+    { id: '13/photo.png', kind: 'file', badge: 'PNG', name: 'photo.png', detail: 'Selected in File Explorer' },
+    { id: '13/notes.pdf', kind: 'file', badge: 'PDF', name: 'notes.pdf', detail: 'Selected in File Explorer' },
+    { id: '6', kind: 'document', badge: 'FILE', name: 'Adobe Acrobat Reader', detail: 'Open in acrord32' },
+    { id: '7', kind: 'tab', badge: 'WEB', name: 'Node.js', detail: 'Chrome tab' },
   ]);
   assert.deepEqual(a.commands.map(c => c.type), ['LIST_OPEN_WINDOWS']);
+});
+
+test('list: explorer window on the Desktop', async t => {
+  const { a } = pair(t, { sidecar: lister({ windows: [{ hwnd: 65552, kind: 'explorer', where: 'desktop', app: 'explorer.exe', title: 'Desktop', names: ['report.docx'] }] }) });
+  const r = await a.handoff.listSendable('b');
+  assert.deepEqual(r.items, [
+    { id: '65552/report.docx', kind: 'file', badge: 'DOCX', name: 'report.docx', detail: 'Selected on the Desktop' },
+  ]);
 });
 
 test('list: empty, error, timeout', async t => {
@@ -208,13 +217,13 @@ test('list guards: not a member, focus, busy', async t => {
   assert.deepEqual(await a.handoff.listSendable('b'), { ok: false, error: 'test is in Focus mode' });
   a.state.modes.b = 'collaborative';
   const first = a.handoff.listSendable('b');
-  assert.deepEqual(await a.handoff.sendDirect('b', 1), { ok: false, error: 'Still working on your last send' });
+  assert.deepEqual(await a.handoff.sendDirect('b', '1'), { ok: false, error: 'Still working on your last send' });
   assert.equal((await first).ok, true);
 });
 
 test('send tab: direct tab commit, opens there, our window untouched', async t => {
   const { a, b } = pair(t, { sidecar: itemer({ kind: 'tab', url: 'https://example.com/', title: 'Example', browser: 'chrome', tabCount: 3 }) });
-  const r = await a.handoff.sendDirect('b', 1);
+  const r = await a.handoff.sendDirect('b', '1');
   assert.deepEqual(r, { ok: true, what: 'tab' });
   const commit = b.received.find(c => c.type === 'TRANSFER_COMMIT');
   assert.equal(commit.kind, 'tab');
@@ -231,7 +240,7 @@ test('send document: file commit with open and app, then exact bytes', async t =
   let file;
   const { a, b, file: f } = pair(t, { sidecar: m => itemer({ kind: 'document', path: file, title: 'draft.txt - Notepad', app: 'notepad.exe' })(m) });
   file = f;
-  const r = await a.handoff.sendDirect('b', 2);
+  const r = await a.handoff.sendDirect('b', '2');
   assert.deepEqual(r, { ok: true, what: 'document' });
   const commit = b.received.find(c => c.type === 'TRANSFER_COMMIT');
   assert.equal(commit.kind, 'file');
@@ -247,9 +256,11 @@ test('send document: file commit with open and app, then exact bytes', async t =
 
 test('send Explorer file: saved, not opened', async t => {
   let file;
-  const { a, b, file: f } = pair(t, { sidecar: m => itemer({ kind: 'file', path: file, name: 'draft.txt', size: 10 })(m) });
+  const { a, b, file: f } = pair(t, { sidecar: m => itemer({ kind: 'file', path: file, name: m.name, size: 10 })(m) });
   file = f;
-  assert.deepEqual(await a.handoff.sendDirect('b', 5), { ok: true, what: 'file' });
+  assert.deepEqual(await a.handoff.sendDirect('b', '13/notes.pdf'), { ok: true, what: 'file' });
+  assert.equal(a.commands[0].hwnd, 13);
+  assert.equal(a.commands[0].name, 'notes.pdf');
   const commit = b.received.find(c => c.type === 'TRANSFER_COMMIT');
   assert.equal(commit.open, undefined);
   assert.equal(commit.app, undefined);
@@ -263,7 +274,7 @@ test('a file: URL tab is sent as a document', async t => {
   let file;
   const { a, b, file: f } = pair(t, { sidecar: m => itemer({ kind: 'tab', url: require('url').pathToFileURL(file).href, title: 'draft.txt', browser: 'chrome', tabCount: 1 })(m) });
   file = f;
-  const r = await a.handoff.sendDirect('b', 1);
+  const r = await a.handoff.sendDirect('b', '1');
   noWindowCommands(a);
   // The URL becomes a Windows path (backslashes), which only Windows can read.
   if (process.platform !== 'win32') return assert.deepEqual(r, { ok: false, error: 'Could not read that file' });
@@ -278,11 +289,12 @@ test('a file: URL tab is sent as a document', async t => {
 test('send: item error, other scheme, unreachable, rejected', async t => {
   let item = { error: 'That window is gone' };
   const { a, b } = pair(t, { receiverMode: 'approval', sidecar: m => itemer(item)(m) });
-  assert.deepEqual(await a.handoff.sendDirect('b', 9), { ok: false, error: 'That window is gone' });
-  item = { kind: 'tab', url: 'chrome://settings', title: 'Settings', browser: 'chrome', tabCount: 1 };
-  assert.deepEqual(await a.handoff.sendDirect('b', 9), { ok: false, error: 'Only web pages can be sent this way' });
+  assert.deepEqual(await a.handoff.sendDirect('b', '9'), { ok: false, error: 'That window is gone' });
+  item = { kind: 'tab', url: 'javascript:alert(1)', title: 'X', browser: 'chrome', tabCount: 1 };
+  assert.deepEqual(await a.handoff.sendDirect('b', '9'), { ok: false, error: "This tab can't be sent" });
+  assert.equal(b.received.some(c => c.type === 'TRANSFER_COMMIT'), false);
   item = { kind: 'tab', url: 'https://example.com/', title: 'Example', browser: 'chrome', tabCount: 1 };
-  const pending = a.handoff.sendDirect('b', 9);
+  const pending = a.handoff.sendDirect('b', '9');
   await tick();
   const commit = b.received.find(c => c.type === 'TRANSFER_COMMIT');
   b.answer(commit.transferId, false);
@@ -290,9 +302,27 @@ test('send: item error, other scheme, unreachable, rejected', async t => {
   noWindowCommands(a);
 });
 
+test('send tab: browser pages are sent as tabs', async t => {
+  for (const [url, browser] of [['chrome://newtab/', 'chrome'], ['edge://settings/', 'edge']]) {
+    const { a, b } = pair(t, { sidecar: itemer({ kind: 'tab', url, title: 'T', browser, tabCount: 1 }) });
+    assert.deepEqual(await a.handoff.sendDirect('b', '1'), { ok: true, what: 'tab' });
+    const commit = b.received.find(c => c.type === 'TRANSFER_COMMIT');
+    assert.equal(commit.kind, 'tab');
+    assert.equal(commit.url, url);
+    assert.equal(commit.browser, browser);
+  }
+});
+
+test('send: garbled item id is refused', async t => {
+  const { a } = pair(t);
+  for (const bad of [5, null, '', 'abc', 'x/y'])
+    assert.deepEqual(await a.handoff.sendDirect('b', bad), { ok: false, error: 'Could not read that window' });
+  assert.equal(a.commands.length, 0);
+});
+
 test('send: unreachable laptop and helper timeout', async t => {
   const { a } = pair(t, { unreachable: true, sidecar: itemer({ kind: 'tab', url: 'https://example.com/', title: 'E', browser: 'chrome', tabCount: 1 }) });
-  assert.deepEqual(await a.handoff.sendDirect('b', 1), { ok: false, error: 'Could not reach that laptop' });
+  assert.deepEqual(await a.handoff.sendDirect('b', '1'), { ok: false, error: 'Could not reach that laptop' });
   const { a: a2 } = pair(t);
-  assert.deepEqual(await a2.handoff.sendDirect('b', 1), { ok: false, error: 'Could not read that window' });
+  assert.deepEqual(await a2.handoff.sendDirect('b', '1'), { ok: false, error: 'Could not read that window' });
 });

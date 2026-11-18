@@ -11,7 +11,15 @@
   const logo = '<span class="logo-symbol" aria-hidden="true"><i></i><i></i></span><strong>odyssync</strong>';
   const laptop = color => `<div class="laptop-art ${color}"><div class="laptop-screen"><span></span><span></span></div><div class="laptop-base"></div></div>`;
   const isPreview = document.body.dataset.preview === 'true';
-  function notify(text) { message.textContent = text; message.hidden = !text; }
+  let messageTimer = null;
+  message.onclick = () => notify('');
+  message.style.cursor = 'pointer';
+  message.title = 'Click to dismiss';
+  function notify(text) {
+    clearTimeout(messageTimer);
+    message.textContent = text; message.hidden = !text;
+    if (text) messageTimer = setTimeout(() => { message.hidden = true; message.textContent = ''; }, 5000);
+  }
   function error(text) { const el = document.querySelector('#error'); if (el) el.textContent = text; else notify(text); }
   const joinErrors = {bad_pin:'Wrong PIN. Check it and try again.', no_room:'No room with that number.', full:'The room is full.', unreachable:'Could not reach the room. Check the connection or the IP address.'};
   function setBusy(value) {
@@ -258,7 +266,7 @@
       const el = document.createElement('div');
       el.className = `screen ${state.isHost ? 'host-draggable' : ''} ${s.deviceId === selfId() ? 'self' : ''} ${sending.has(s.deviceId) ? 'sending' : ''}`;
       el.dataset.id = s.deviceId;
-      el.innerHTML = `<span class="screen-number">${String(i+1).padStart(2,'0')}</span><div class="device-art" aria-hidden="true">${laptop(['blue','orange','lime','blue'][i%4])}</div><span class="screen-name">${esc(title)}</span><span class="screen-you">${s.deviceId === selfId() ? 'Your laptop' : sending.has(s.deviceId) ? 'Sending…' : 'Right-click: send…'}</span>`;
+      el.innerHTML = `<span class="screen-number">${String(i+1).padStart(2,'0')}</span><div class="device-art" aria-hidden="true">${laptop(['blue','orange','lime','blue'][i%4])}</div><span class="screen-name">${esc(title)}</span><span class="screen-you">${s.deviceId === selfId() ? 'Your laptop' : sending.has(s.deviceId) ? (sendCaption.get(s.deviceId) || 'Sending…') : 'Right-click: send…'}</span>`;
       position(el,s); canvas.append(el);
       if (s.deviceId !== selfId() && typeof api.sendDirect === 'function' && typeof api.listSendable === 'function') {
         const id = s.deviceId; el.tabIndex = 0; el.title = 'Right-click to send a tab, document or file';
@@ -289,13 +297,18 @@
       }
     });
   }
-  async function sendItem(id,title,itemId,after) {
-    sending.add(id); paintCanvas();
-    let text;
-    try { const r = await api.sendDirect({deviceId:id,itemId}); text = r?.ok ? `Sent to ${title}` : r?.error || 'Could not send.'; }
-    catch (err) { text = 'Could not send.'; }
-    finally { sending.delete(id); if (after) after(); paintCanvas(); }
-    notify(text);
+  const sendCaption = new Map();
+  async function sendItem(id,title,itemId,after) { return sendItems(id,title,[itemId],after); }
+  async function sendItems(id,title,itemIds,after) {
+    sending.add(id); paintCanvas(); if (after) after();
+    const n = itemIds.length; let ok = 0, firstError = '';
+    for (let i = 0; i < n; i++) {
+      if (n > 1) { sendCaption.set(id,`Sending ${i+1} of ${n}…`); paintCanvas(); }
+      try { const r = await api.sendDirect({deviceId:id,itemId:itemIds[i]}); if (r?.ok) ok++; else if (!firstError) firstError = r?.error || 'Could not send.'; }
+      catch (err) { if (!firstError) firstError = 'Could not send.'; }
+    }
+    sending.delete(id); sendCaption.delete(id); paintCanvas();
+    notify(ok === n ? (n === 1 ? `Sent to ${title}` : `Sent ${n} items to ${title}`) : ok ? `Sent ${ok} of ${n} to ${title}. ${firstError}` : firstError || 'Could not send.');
   }
   function closeSendDialog() { document.querySelectorAll('.send-dialog').forEach(d => { if (d.open) d.close(); d.remove(); }); }
   function openSendDialog(id,title,items) {
@@ -304,30 +317,32 @@
     const dialog = document.createElement('dialog');
     dialog.className = 'entry-dialog send-dialog'; dialog.dataset.deviceId = id; dialog.setAttribute('aria-labelledby','send-title');
     const kindWord = i => i.kind === 'tab' ? 'tab' : 'file';
-    dialog.innerHTML = `<form method="dialog"><h2 id="send-title">Select to send</h2><div class="send-list" role="radiogroup" aria-label="Items to send">${items.map((it,i) => `<button type="button" role="radio" aria-checked="${i===0}" data-i="${i}"><span class="send-badge ${/^(ZIP|RAR|7Z|EXE|FILE)$/i.test(it.badge||'') ? 'warm' : ''}">${esc(it.badge)}</span><span class="send-text"><b>${esc(it.name)}</b><small>${esc(it.detail)}</small></span><span class="send-check" aria-hidden="true">✓</span></button>`).join('')}</div><div class="send-footer"><span class="send-count"></span><button class="send-button" type="submit">Send file</button></div></form>`;
+    dialog.innerHTML = `<form method="dialog"><h2 id="send-title">Select to send</h2><div class="send-list" role="group" aria-labelledby="send-title">${items.map((it,i) => `<button type="button" role="checkbox" aria-checked="false" data-i="${i}"><span class="send-badge ${/^(ZIP|RAR|7Z|EXE|FILE)$/i.test(it.badge||'') ? 'warm' : ''}">${esc(it.badge)}</span><span class="send-text"><b>${esc(it.name)}</b><small>${esc(it.detail)}</small></span><span class="send-check" aria-hidden="true">✓</span></button>`).join('')}</div><div class="send-footer"><span class="send-count"></span><button class="send-button" type="submit">Send</button></div></form>`;
     document.body.append(dialog);
-    const rows = [...dialog.querySelectorAll('[role=radio]')], sendBtn = dialog.querySelector('.send-button');
-    let sel = 0, sendingNow = false;
+    const rows = [...dialog.querySelectorAll('[role=checkbox]')], sendBtn = dialog.querySelector('.send-button');
+    const ticked = new Set();
     const paint = () => {
-      rows.forEach((row,i) => { row.setAttribute('aria-checked',String(i===sel)); row.tabIndex = i===sel ? 0 : -1; });
-      const w = kindWord(items[sel]); dialog.querySelector('.send-count').textContent = `1 ${w} selected`; sendBtn.textContent = `Send ${w}`;
+      rows.forEach((row,i) => row.setAttribute('aria-checked',String(ticked.has(i))));
+      const n = ticked.size, one = n === 1 ? kindWord(items[[...ticked][0]]) : '';
+      dialog.querySelector('.send-count').textContent = n === 0 ? 'Nothing selected' : n === 1 ? `1 ${one} selected` : `${n} items selected`;
+      sendBtn.textContent = n === 0 ? 'Send' : n === 1 ? `Send ${one}` : `Send ${n} items`; sendBtn.disabled = n === 0;
     };
     paint();
-    rows.forEach((row,i) => row.onclick = () => { if (sendingNow) return; sel = i; paint(); });
+    rows.forEach((row,i) => row.onclick = () => { if (ticked.has(i)) ticked.delete(i); else ticked.add(i); paint(); });
     dialog.querySelector('.send-list').onkeydown = e => {
-      if (sendingNow || !['ArrowUp','ArrowDown'].includes(e.key)) return;
-      e.preventDefault(); sel = (sel + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length; paint(); rows[sel].focus();
+      if (!['ArrowUp','ArrowDown'].includes(e.key)) return;
+      e.preventDefault(); const cur = Math.max(0,rows.indexOf(document.activeElement));
+      rows[(cur + (e.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length].focus();
     };
-    dialog.addEventListener('cancel',e => { e.preventDefault(); if (!sendingNow) closeSendDialog(); });
+    dialog.addEventListener('cancel',e => { e.preventDefault(); closeSendDialog(); });
     dialog.addEventListener('click',e => {
-      if (e.target !== dialog || sendingNow) return;
+      if (e.target !== dialog) return;
       const b = dialog.getBoundingClientRect();
       if (e.clientX < b.left || e.clientX > b.right || e.clientY < b.top || e.clientY > b.bottom) closeSendDialog();
     });
-    dialog.querySelector('form').onsubmit = async e => {
-      e.preventDefault(); if (sendingNow) return;
-      sendingNow = true; sendBtn.disabled = true; rows.forEach(r => r.disabled = true); sendBtn.textContent = 'Sending…';
-      await sendItem(id,title,items[sel].id,closeSendDialog);
+    dialog.querySelector('form').onsubmit = e => {
+      e.preventDefault(); if (!ticked.size) return;
+      sendItems(id,title,[...ticked].sort((a,b) => a-b).map(i => items[i].id),closeSendDialog);
     };
     dialog.showModal(); rows[0].focus();
   }

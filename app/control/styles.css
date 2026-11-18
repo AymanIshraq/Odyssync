@@ -302,3 +302,4 @@ label,.label{font-size:12px;font-weight:500}
 body.light .send-badge{background:#155cf41f;color:var(--cobalt)}
 body.light .send-badge.warm{background:#ff76181f;color:#c2520a}
 body.light .send-list button[aria-checked=true]{background:#155cf41a}
+.send-button:disabled{opacity:.45;cursor:default}
