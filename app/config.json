@@ -1,8 +1,5 @@
 {
   "relayUrl": "wss://odyssync-production.up.railway.app",
   "localPort": 8080,
-  "elevenLabsAgentId": "",
-  "picovoiceAccessKey": "",
-  "wakeWordFile": "hey-odyssync.ppn",
-  "wakeModelFile": "porcupine_params.pv"
+  "elevenLabsAgentId": ""
 }

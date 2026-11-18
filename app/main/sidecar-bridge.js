@@ -17,7 +17,7 @@ let sidecar = null; // the one connected sidecar socket, or null
 let child = null; // the Python process we started, or null
 let restartTimer = null; // waiting to start Python again
 let stopped = false; // true after stop(): never restart again
-let callback = null; // the app's onMessage function
+const listeners = []; // the app's onMessage functions (handoff, voice)
 let edges = { left: false, right: false, top: false, bottom: false };
 let lastSentEdges = null; // what this connection last got, as text
 
@@ -26,6 +26,13 @@ function sendEdges() {
   const msg = { type: 'SET_ACTIVE_EDGES', ...edges };
   const text = JSON.stringify(msg);
   if (text !== lastSentEdges && send(msg)) lastSentEdges = text;
+}
+
+// Hand one message to every listener; one that throws does not stop the others.
+function tell(msg, payload) {
+  for (const cb of listeners) {
+    try { cb(msg, payload); } catch (err) { console.log('[sidecar] listener failed on ' + msg.type + ': ' + err.message); }
+  }
 }
 
 // One message from the sidecar: log it (not the 60-per-second ones), then pass it on.
@@ -38,7 +45,7 @@ function handleMessage(data, isBinary) {
       return;
     }
     if (msg.type !== 'LOCAL_DRAG_MOVE') console.log('[sidecar] ' + JSON.stringify(msg));
-    if (callback) callback(msg, null);
+    tell(msg, null);
     return;
   }
   // Binary message: [uint32 LE header length][JSON header][payload bytes].
@@ -53,7 +60,7 @@ function handleMessage(data, isBinary) {
     console.log('[sidecar] bad binary frame (' + data.length + ' bytes): ' + err.message);
     return;
   }
-  if (callback) callback(header, payload);
+  tell(header, payload);
 }
 
 // Print what Python writes, one line at a time, so its output reads cleanly in our log.
@@ -168,7 +175,7 @@ module.exports = {
   start,
   stop,
   send,
-  onMessage: (cb) => { callback = cb; },
+  onMessage: (cb) => { listeners.push(cb); },
   isConnected: () => sidecar !== null,
   setActiveEdges,
 };

@@ -39,6 +39,11 @@
       async answerJoinRequest(requestId,accepted){requireHost();const request=state.management.joinRequests.find(r=>r.requestId===requestId);if(!request)throw Error('This request is no longer pending.');if(accepted)addMember(request.member);state.management.joinRequests=state.management.joinRequests.filter(r=>r.requestId!==requestId);emit();},
       async setSharingPermission(deviceId,allowed){requireHost();if(deviceId===self.deviceId)throw Error('The host keeps sharing access.');if(!state.members.some(m=>m.deviceId===deviceId))throw Error('This laptop has left the room.');state.management.sharingPermissions[deviceId]=allowed;emit();}
     },
+    voice:(()=>{let s={enabled:true,model:'hey_odyssync',models:[{id:'hey_odyssync',name:'Hey Odyssync',source:'app'},{id:'hey_jarvis',name:'Hey Jarvis',source:'app'},{id:'hey_buddy',name:'Hey Buddy',source:'user'}],status:{enabled:true,model:'hey_odyssync'}};const cbs=[];const out=()=>structuredClone(s);const emit=()=>cbs.forEach(f=>f(out()));return{
+      async getWakeSettings(){return out();},
+      async setWakeSettings(p){s={...s,...p};s.status={enabled:s.enabled,model:s.model};emit();return out();},
+      async openWakeFolder(){return {ok:true,folder:'/demo/wakewords'};},
+      onWakeSettings(f){cbs.push(f);}};})(),
     onState(fn){listeners.push(fn);fn(structuredClone(state));return()=>listeners=listeners.filter(f=>f!==fn);},
     onNotice(fn){notices.push(fn);return()=>notices=notices.filter(f=>f!==fn);}
   };

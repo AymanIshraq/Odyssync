@@ -5,7 +5,16 @@ const sidecarBridge = require('./sidecar-bridge');
 const os = require('os');
 const room = require('./room');
 const { createVoice } = require('./voice');
-const config = require('../config.json');
+// config.local.json (git-ignored) holds the private keys and is merged over config.json.
+function readLocal() {
+  try {
+    return JSON.parse(require('fs').readFileSync(path.join(__dirname, '../config.local.json'), 'utf8'));
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.log('[config] config.local.json is not valid JSON; ignoring it');
+    return {};
+  }
+}
+const config = { ...require('../config.json'), ...readLocal() };
 
 let controlWin = null;
 let overlayWin = null;
@@ -77,7 +86,8 @@ app.whenReady().then(() => {
   createControlWindow();
   createOverlayWindow();
   createTray();
-  voice = createVoice({ manager, overlay, ipcMain, globalShortcut, BrowserWindow, appDir: path.join(__dirname, '..'), config, notify: (text) => console.log('[voice] ' + text) });
+  voice = createVoice({ manager, overlay, ipcMain, globalShortcut, BrowserWindow, appDir: path.join(__dirname, '..'), config, notify: (text) => console.log('[voice] ' + text),
+    bridge: sidecarBridge, shell, settingsPath: path.join(app.getPath('userData'), 'voice-settings.json'), getControlWindow: () => controlWin });
   sidecarBridge.start();
 });
 

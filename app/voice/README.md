@@ -1,13 +1,18 @@
 # Voice window (hidden)
 
 `index.html` + `voice.js` run in a hidden window (preload: `main/preload-voice.js`).
-They listen for "Hey Odyssync" (Picovoice Porcupine) or the voice hotkey, then talk to an
-ElevenLabs agent. The agent's "brain" is a Groq model. Without keys nothing breaks:
-the hotkey shows "Voice is not set up yet", and the wake word stays off.
+They start when main sends `voice:start` (the voice hotkey or the wake word), then talk to an
+ElevenLabs agent. The agent's "brain" is a Groq model. Without the agent ID nothing breaks:
+the hotkey shows "Voice is not set up yet".
 
-Libraries load as plain scripts straight from `node_modules` (no build step):
-`@elevenlabs/client@1.33.0` (`dist/lib.iife.js`), `@picovoice/web-voice-processor@4.0.10`,
-`@picovoice/porcupine-web@4.0.1` (`dist/iife/index.min.js`).
+The library loads as a plain script straight from `node_modules` (no build step):
+`@elevenlabs/client@1.33.0` (`dist/lib.iife.js`).
+
+## Where the key goes
+
+- Create `app/config.local.json` with `{"elevenLabsAgentId": "..."}`.
+- Copy it to the Windows laptop before `npm run dist:win`.
+- Never commit it; git ignores it.
 
 ## 1. Groq (free LLM key)
 
@@ -67,14 +72,13 @@ Rules:
 - When the user is done ("thanks", "that's all"), say a short goodbye.
 ```
 
-## 3. Wake word (Picovoice)
+## 3. Wake word
 
-1. Sign up at https://console.picovoice.ai and copy the **AccessKey** into the app's voice config.
-2. Porcupine -> train wake word `Hey Odyssync`, language English, platform **Web (WASM)**.
-   Download, unzip, and save the `.ppn` as `app/voice/hey-odyssync.ppn`.
-3. Download the English model params `porcupine_params.pv` (from the Porcupine GitHub repo,
-   `lib/common/porcupine_params.pv`) and save it as `app/voice/porcupine_params.pv`.
-   The `.ppn` and `.pv` must be the same Porcupine version (v4).
+The wake word is detected on the laptop by the Windows helper using openWakeWord (no account
+needed). Pick it in the Control Center's Voice row. Custom names are trained with
+`tools/wakeword/README.md`.
+
+Privacy: the helper only detects the phrase; audio is never stored or sent. Ctrl+Alt+Space always works.
 
 ## 4. Microphone
 

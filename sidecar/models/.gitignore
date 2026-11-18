@@ -1,0 +1,6 @@
+# Ready-made wake words: fetched at build time by tools/fetch-voice-models.py.
+hey_jarvis.onnx
+alexa.onnx
+hey_mycroft.onnx
+hey_rhasspy.onnx
+*.part

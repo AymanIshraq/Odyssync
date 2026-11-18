@@ -222,3 +222,6 @@ __marimo__/
 # Node
 node_modules/
 dumb-down.md
+
+# Voice keys (private)
+app/config.local.json

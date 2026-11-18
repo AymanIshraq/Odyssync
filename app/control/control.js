@@ -138,6 +138,33 @@
     dialog.showModal();
     dialog.querySelector('input')?.focus();
   }
+  let wake = null;
+  function voiceRowHtml() {
+    if (!api?.voice || !wake) return '';
+    const models = wake.models || [];
+    const cur = models.find(m => m.id === wake.model);
+    const st = wake.status;
+    const text = st?.error ? st.error
+      : !models.length ? 'No wake words yet'
+      : wake.enabled && st?.enabled ? `Listening for "${cur?.name || wake.model}" on this laptop only`
+      : 'Off \u2014 Ctrl+Alt+Space still works';
+    return `<div class="voice-row"><label class="voice-switch"><strong>Wake word</strong><input id="wake-on" type="checkbox" role="switch" aria-label="Wake word" ${wake.enabled ? 'checked' : ''}></label><select id="wake-model" aria-label="Wake word model" ${models.length ? '' : 'disabled'}>${models.map(m => `<option value="${esc(m.id)}" ${m.id === wake.model ? 'selected' : ''}>${esc(m.name)}${m.source === 'user' ? ' (your own)' : ''}</option>`).join('')}</select><button class="link" id="wake-add" type="button">Add your own\u2026</button></div><p class="voice-status" id="wake-status">${esc(text)}</p>`;
+  }
+  function paintVoice() {
+    const sec = document.querySelector('.voice-section');
+    if (!sec) return;
+    sec.innerHTML = voiceRowHtml();
+    const apply = async patch => {
+      try { wake = await api.voice.setWakeSettings(patch) || wake; } catch (e) { notify(e?.message || 'Could not change the wake word.'); }
+      paintVoice();
+    };
+    sec.querySelector('#wake-on')?.addEventListener('change', e => apply({enabled: e.target.checked}));
+    sec.querySelector('#wake-model')?.addEventListener('change', e => apply({model: e.target.value}));
+    sec.querySelector('#wake-add')?.addEventListener('click', async () => {
+      try { await api.voice.openWakeFolder(); } catch {}
+      notify('Train a name with tools/wakeword (Colab) and put the .onnx file in the folder that just opened.');
+    });
+  }
   function renderRoom() {
     const screens = state.screens || [];
     app.innerHTML = `<div class="workspace-window">${header()}<div class="workspace-body"><section class="room-top"><div><span class="eyebrow">Workspace / ${state.isHost ? 'Host' : 'Member'}</span><h1>Your workspace</h1></div><button class="secondary" id="copy">Copy Invite <span aria-hidden="true">⧉</span></button></section><section class="invite"><div><span class="label">Room number</span><strong>${esc(state.roomNumber || '—')}</strong></div><div><span class="label">Room PIN</span><strong>${esc(state.pin || '—')}</strong></div>${state.localIps?.length ? `<div><span class="label">Host IP</span><strong class="ips">${esc(state.localIps.join(', '))}</strong></div>` : ''}</section><section class="canvas-panel"><div class="canvas-heading"><div><h2><span class="section-index">01</span> Workspace devices</h2><p>${state.isHost ? 'Drag over a laptop to swap, or beside it to arrange your desk.' : 'Your host arranges the screens. Changes appear here live.'}</p></div><span class="count">${screens.length} ${screens.length === 1 ? 'screen' : 'screens'}</span></div><div class="canvas" id="canvas" aria-label="Laptop layout"></div><div class="canvas-footer">${state.isHost ? 'Keyboard: focus a laptop, use arrow keys, then Enter to place or swap.' : 'View only · Your host manages this layout.'}</div></section><div class="workspace-exit"><button class="leave-button" id="leave"><span aria-hidden="true">⇥</span> ${state.isHost ? 'End Room' : 'Leave'}</button></div></div><footer class="landing-footer"><span>${isPreview ? 'Demo · No laptops connected' : 'Odyssync · Control Center'}</span><span>${state.isHost ? 'Host controls' : 'Member view'}</span></footer></div>`;
@@ -189,6 +216,12 @@
       await api.leaveRoom(); if (token !== operation) return;
       state = {self:state.self}; launch(); notify('You left the room.');
     });
+    if (api?.voice && wake) {
+      const sec = document.createElement('section');
+      sec.className = 'voice-section';
+      document.querySelector('.workspace-exit').before(sec);
+      paintVoice();
+    }
     paintCanvas();
   }
   function managementIcon(kind) {
@@ -417,6 +450,10 @@
       if (['kicked','room_closed'].includes(notice.kind)) { operation++; busy = false; drag = null; state = {self:state.self}; launch(); }
       notify(notice.text || 'The room connection changed.');
     });
+  }
+  if (api?.voice) {
+    api.voice.onWakeSettings(s => { wake = s; paintVoice(); });
+    api.voice.getWakeSettings().then(s => { wake = s; paintVoice(); if (view === 'room' && !document.querySelector('.voice-section')) renderRoom(); }).catch(() => {});
   }
   new ResizeObserver(() => { if (!drag) paintCanvas(); }).observe(app);
   render();

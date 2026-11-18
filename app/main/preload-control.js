@@ -14,6 +14,13 @@ contextBridge.exposeInMainWorld('odyssync', {
   listSendable: call('listSendable'),
   sendDirect: call('sendDirect'),
 
+  voice: {
+    getWakeSettings: () => ipcRenderer.invoke('voice:getWakeSettings'),
+    setWakeSettings: (patch) => ipcRenderer.invoke('voice:setWakeSettings', patch),
+    openWakeFolder: () => ipcRenderer.invoke('voice:openWakeFolder'),
+    onWakeSettings: (cb) => { ipcRenderer.on('voice:wakeSettings', (event, s) => cb(s)); },
+  },
+
   // Every new state, plus the current one right away so the page can draw.
   onState: (cb) => {
     ipcRenderer.on('room:state', (event, state) => cb(state));

@@ -19,6 +19,8 @@ function run(command, args, cwd = root, env = process.env) {
 
 run(python, ['-c', "import struct, sys; assert sys.version_info >= (3, 11) and struct.calcsize('P') == 8, 'Use 64-bit Python 3.11 or newer'"]);
 run(python, ['-m', 'pip', 'install', '-r', path.join(root, 'sidecar', 'requirements-build.txt')]);
+// Ready-made wake words are git-ignored; fetch them before bundling sidecar/models.
+run(python, [path.join(root, 'tools', 'fetch-voice-models.py')]);
 run(python, [
   '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--console', '--noupx',
   '--name', 'odyssync-sidecar', '--paths', root,
@@ -27,6 +29,8 @@ run(python, [
   '--specpath', path.join(root, 'build'),
   '--collect-all', 'uiautomation', '--collect-submodules', 'comtypes.gen',
   '--hidden-import', 'win32timezone', '--hidden-import', 'websockets.asyncio.client',
+  '--hidden-import', 'openwakeword', '--hidden-import', 'sounddevice',
+  '--add-data', path.join(root, 'sidecar', 'models') + ';sidecar/models',
   path.join(root, 'tools', 'sidecar-entry.py'),
 ]);
 

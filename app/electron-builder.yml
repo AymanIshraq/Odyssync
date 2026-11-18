@@ -10,15 +10,13 @@ files:
   - overlay/**/*
   - voice/**/*
   - config.json
+  - config.local.json
   - package.json
   - '!**/*.test.cjs'
   - '!**/*.md'
   - '!control/tests*'
   - '!control/preview*'
   - '!control/check_browser.py'
-asarUnpack:
-  - voice/*.ppn
-  - voice/*.pv
 extraResources:
   - from: ../dist/sidecar/odyssync-sidecar
     to: sidecar

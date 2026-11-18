@@ -1,10 +1,9 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval' blob: data: https://cdn.jsdelivr.net; worker-src 'self' blob:; connect-src 'self' file: data: blob: https://*.elevenlabs.io wss://*.elevenlabs.io; media-src 'self' blob: mediastream:">
+<!-- jsdelivr + wasm-unsafe-eval: @elevenlabs/client loads the libsamplerate AudioWorklet (WebAssembly) from the CDN when the mic needs resampling. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' blob: data: https://cdn.jsdelivr.net 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self' file: data: blob: https://cdn.jsdelivr.net https://*.elevenlabs.io wss://*.elevenlabs.io; media-src 'self' blob: mediastream:">
 <title>Odyssync voice</title></head>
 <body>
 <script src="../node_modules/@elevenlabs/client/dist/lib.iife.js"></script>
-<script src="../node_modules/@picovoice/web-voice-processor/dist/iife/index.min.js"></script>
-<script src="../node_modules/@picovoice/porcupine-web/dist/iife/index.min.js"></script>
 <script src="voice.js"></script>
 </body></html>

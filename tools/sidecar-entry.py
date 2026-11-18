@@ -35,6 +35,13 @@ def self_test():
         subprocess.run([str(Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"),
                         "/d", "/c", "exit", "0"], check=True,
                        creationflags=subprocess.CREATE_NO_WINDOW)
+    # Wake word: bundled models load offline (no microphone needed here).
+    from openwakeword import Model
+    import sounddevice  # noqa: F401  (PortAudio DLL bundled)
+    from sidecar.wakeword import default_app_models_dir
+    models = default_app_models_dir()
+    Model(wakeword_models=[str(models / "hey_jarvis.onnx")], melspec_model_path=str(models / "melspectrogram.onnx"),
+          embedding_model_path=str(models / "embedding_model.onnx"), inference_framework="onnx")
     print(json.dumps({"selfTest": "passed", "frozen": bool(getattr(sys, "frozen", False)),
                       **desktop.screen_info()}), flush=True)
 

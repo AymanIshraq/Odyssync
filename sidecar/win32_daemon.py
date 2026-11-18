@@ -19,6 +19,7 @@ from sidecar.handoff import WindowController
 from sidecar.lookups import current_item_reply, lookup_reply, open_windows_reply, window_item_reply
 from sidecar.notepad import clear_snapshots
 from sidecar.preview import capture_preview
+from sidecar.wakeword import WakeWordListener
 from sidecar.windows import WindowsDesktop, enable_dpi_awareness, warm_browser_worker
 
 log = logging.getLogger(__name__)
@@ -81,6 +82,18 @@ class LookupReader(BrowserReader):
         warmed.add_done_callback(lambda future: future.exception())
 
 
+class ThreadOutbox:
+    """Lets the wake-word thread hand events to the event-loop-owned Outbox."""
+
+    def __init__(self, outbox, loop):
+        self.outbox = outbox
+        self.loop = loop
+
+    def put(self, event):
+        with suppress(RuntimeError):  # The session (and its loop) already ended.
+            self.loop.call_soon_threadsafe(self.outbox.put, event)
+
+
 class Outbox:
     """Bounded lifecycle queue; movement occupies only one replaceable slot."""
 
@@ -117,7 +130,7 @@ class Outbox:
 
 
 async def receive_commands(socket, active, controller=None, outbox=None, executor=None, stopped=None,
-                           desktop=None, lookups=None, visibility_executor=None):
+                           desktop=None, lookups=None, visibility_executor=None, wake=None):
     opening = set()
 
     async def open_window(message):
@@ -131,7 +144,7 @@ async def receive_commands(socket, active, controller=None, outbox=None, executo
 
     try:
         await command_stream(socket, active, controller, outbox, executor, stopped, desktop, lookups,
-                             opening, open_window, visibility_executor)
+                             opening, open_window, visibility_executor, wake)
         await asyncio.gather(*opening)
     except BaseException:
         for task in opening:
@@ -142,7 +155,7 @@ async def receive_commands(socket, active, controller=None, outbox=None, executo
 
 
 async def command_stream(socket, active, controller, outbox, executor, stopped, desktop, lookups,
-                         opening, open_window, visibility_executor):
+                         opening, open_window, visibility_executor, wake=None):
     async for raw in socket:
         for task in list(opening):
             if task.done():
@@ -207,6 +220,18 @@ async def command_stream(socket, active, controller, outbox, executor, stopped, 
                                              "Reading that window timed out; try again", "Could not read that window")
                 if outbox is not None:
                     outbox.put(result)
+            elif message.get("type") == "LIST_WAKE_WORDS":
+                if wake is None or outbox is None:
+                    raise ValueError("Wake-word handler is unavailable")
+                outbox.put({"type": "WAKE_WORDS", "models": wake.list_models()})
+            elif message.get("type") == "SET_WAKE_WORD":
+                enabled, model = message.get("enabled"), message.get("model")
+                if type(enabled) is not bool or not (model is None or isinstance(model, str)):
+                    raise ValueError("SET_WAKE_WORD requires a boolean enabled and an optional model id")
+                if wake is None:
+                    raise ValueError("Wake-word handler is unavailable")
+                # Stopping the old listener can wait on its thread; keep polling smooth.
+                await asyncio.get_running_loop().run_in_executor(None, wake.set, enabled, model)
             elif message.get("type") in ("HIDE_WINDOW", "SHOW_WINDOW", "CLOSE_WINDOW", "OPEN_URL", "OPEN_FILE",
                                          "BOUNCE_WINDOW"):
                 if controller is None or outbox is None:
@@ -377,7 +402,7 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None, documents
                 future.add_done_callback(lambda result: None if result.cancelled() else result.exception())
 
 
-async def run_session(socket, desktop, reader, controller=None, previews=None, lookups=None):
+async def run_session(socket, desktop, reader, controller=None, previews=None, lookups=None, wake=None):
     active = set()  # Tech 2 resends the layout after every SIDECAR_READY.
     outbox = Outbox()
     controller = controller or WindowController()
@@ -388,9 +413,10 @@ async def run_session(socket, desktop, reader, controller=None, previews=None, l
     stopped = threading.Event()
     commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="window-commands")
     visibility = ThreadPoolExecutor(max_workers=1, thread_name_prefix="window-visibility")
+    wake = wake or WakeWordListener(ThreadOutbox(outbox, asyncio.get_running_loop()))
     await socket.send(json.dumps({"type": "SIDECAR_READY", **desktop.screen_info()}))
     tasks = [asyncio.create_task(receive_commands(socket, active, controller, outbox, commands, stopped,
-                                                  desktop, lookups, visibility)),
+                                                  desktop, lookups, visibility, wake)),
              asyncio.create_task(poll_desktop(desktop, active, outbox, reader, previews,
                                               getattr(controller, "documents", None))),
              asyncio.create_task(outbox.send(socket))]
@@ -401,6 +427,8 @@ async def run_session(socket, desktop, reader, controller=None, previews=None, l
             task.result()
     finally:
         stopped.set()
+        # The microphone never stays open without a bridge to report to.
+        await asyncio.get_running_loop().run_in_executor(None, wake.stop)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

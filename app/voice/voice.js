@@ -1,55 +1,17 @@
-// Hidden Voice window: wake word ("Hey Odyssync") + ElevenLabs voice agent.
-// Libraries come in as plain scripts from index.html:
-//   ElevenLabsClient (@elevenlabs/client), WebVoiceProcessor, PorcupineWeb.
+// Hidden Voice window: ElevenLabs voice agent. Sessions start only when main sends
+// 'voice:start' (the hotkey, or the Windows helper's wake word).
+// The library comes in as a plain script from index.html: ElevenLabsClient (@elevenlabs/client).
 (function () {
   const api = window.odyssyncVoice;
   const { Conversation } = window.ElevenLabsClient;
-  const { WebVoiceProcessor } = window.WebVoiceProcessor;
-  const { PorcupineWorker } = window.PorcupineWeb;
 
   const TOOLS = ['list_members', 'set_mode', 'send_current', 'show_send_menu', 'send_items'];
   const SILENCE_MS = 8000;      // end the chat after 8 s of quiet once the agent has spoken
   const VAD_SPEECH = 0.5;       // voice-activity score that counts as "the user is talking"
 
-  let config = { agentId: '', accessKey: '', keywordPath: '', modelPath: '' };
-  let porcupine = null;         // wake-word engine, or null when not set up
+  let config = { agentId: '' };
   let session = null;           // { conversation, ended, endWanted } while a chat is running
   let silenceTimer = null;
-
-  // ---- wake word ----
-
-  async function setupWakeWord() {
-    const { accessKey, keywordPath, modelPath } = config;
-    if (!accessKey || !keywordPath || !modelPath) {
-      console.log('Wake word off: missing',
-        [!accessKey && 'Picovoice AccessKey', !keywordPath && 'hey-odyssync.ppn', !modelPath && 'porcupine_params.pv']
-          .filter(Boolean).join(', '), '- the hotkey still works.');
-      return;
-    }
-    try {
-      porcupine = await PorcupineWorker.create(
-        accessKey,
-        [{ publicPath: keywordPath, label: 'Hey Odyssync', forceWrite: true }],
-        () => { if (!session) startSession(); },
-        { publicPath: modelPath, forceWrite: true },
-        { processErrorCallback: (err) => console.log('Wake word error:', err && err.message) },
-      );
-      await resumeWakeWord();
-    } catch (err) {
-      porcupine = null;
-      console.log('Wake word off:', err && err.message);
-    }
-  }
-
-  async function pauseWakeWord() {
-    if (!porcupine) return;
-    try { await WebVoiceProcessor.unsubscribe(porcupine); } catch (err) { console.log('Wake word pause:', err && err.message); }
-  }
-
-  async function resumeWakeWord() {
-    if (!porcupine) return;
-    try { await WebVoiceProcessor.subscribe(porcupine); } catch (err) { console.log('Wake word listen:', err && err.message); }
-  }
 
   // ---- silence timer ----
 
@@ -97,7 +59,6 @@
     }
     const s = { conversation: null, ended: false, endWanted: false };
     session = s;
-    await pauseWakeWord();                  // free the microphone for the agent
     api.setState('thinking');               // connecting
 
     // Check the microphone first so we can tell "no mic" apart from "no internet".
@@ -145,7 +106,7 @@
       api.notice(isMicError(err) ? 'Microphone is not available' : 'Voice needs an internet connection');
       return finish(s);
     }
-    if (s.endWanted) return endSession();   // hotkey pressed again while connecting
+    if (s.endWanted) return endSession();   // start pressed again while connecting
     if (!s.ended) { api.setState('listening'); startSilenceTimer(); }
   }
 
@@ -164,7 +125,6 @@
     clearSilenceTimer();
     if (session === s) session = null;
     api.setState('idle');
-    resumeWakeWord();
   }
 
   // ---- start ----
@@ -174,6 +134,5 @@
   api.getConfig().then((cfg) => {
     config = Object.assign(config, cfg || {});
     if (!config.agentId) console.log('Voice agent off: no ElevenLabs agent ID yet.');
-    return setupWakeWord();
   }).catch((err) => console.log('Voice config failed:', err && err.message));
 })();

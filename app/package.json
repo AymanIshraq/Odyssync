@@ -13,8 +13,6 @@
   },
   "dependencies": {
     "@elevenlabs/client": "1.33.0",
-    "@picovoice/porcupine-web": "4.0.1",
-    "@picovoice/web-voice-processor": "4.0.10",
     "ws": "^8.23.0"
   },
   "devDependencies": {

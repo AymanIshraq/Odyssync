@@ -369,3 +369,28 @@ and voice lookup after switching from the browser/Explorer back to the app.
 Verify the selected-file lookup with one file, no selection, and multiple
 selections, including Explorer tabs on the demo's Windows version. The
 four-laptop twenty-handoff rehearsal remains an integration acceptance check.
+
+## Wake word (openWakeWord, offline)
+
+`sidecar/wakeword.py` listens on the microphone for one chosen phrase. It only
+answers "was that the phrase, yes or no"; audio is held in memory 80 ms at a
+time and is never stored or sent. Commands from Electron:
+
+- `LIST_WAKE_WORDS` → `{type: 'WAKE_WORDS', models: [{id, name, source: 'app'|'user'}]}`
+- `SET_WAKE_WORD {enabled, model?}` → `{type: 'WAKE_WORD_STATUS', enabled: true, model}`,
+  or `{type: 'WAKE_WORD_STATUS', enabled: false, error?}` when turned off or
+  something is missing (library, model file, microphone)
+- On a detection (score ≥ 0.5): `{type: 'WAKE_WORD', model}`, then 2 s of quiet
+
+Models come from `sidecar/models/*.onnx` (id = file name) and
+`%APPDATA%\Odyssync\wakewords\*.onnx` (id = `user:` + file name). The name
+shown is the file name in title case: `hey_buddy.onnx` → "Hey Buddy".
+`melspectrogram.onnx` and `embedding_model.onnx` are committed. The ready-made
+Hey Jarvis, Alexa, Hey Mycroft and Hey Rhasspy are git-ignored; get them with:
+
+```powershell
+python tools/fetch-voice-models.py
+```
+
+`npm run dist:win` runs this automatically. The ready-made models are licensed
+for non-commercial use only.

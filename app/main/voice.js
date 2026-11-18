@@ -3,7 +3,7 @@
 // same code as right-click send. Menus and toasts are drawn by the overlay.
 const path = require('path');
 const fs = require('fs');
-const { pathToFileURL } = require('url');
+const os = require('os');
 
 const HOTKEY = 'Control+Alt+Space';
 const MODES = ['collaborative', 'approval', 'focus'];
@@ -20,7 +20,18 @@ function summary(sent, total, name, label, error) {
   return error || 'Could not send.';
 }
 
-function createVoice({ manager, overlay, ipcMain, globalShortcut, BrowserWindow, appDir, config = {}, notify = () => {} }) {
+// Where people drop their own trained wake words (*.onnx); the helper looks here too.
+function defaultWakeFolder() {
+  return process.platform === 'win32'
+    ? path.join(process.env.APPDATA || os.homedir(), 'Odyssync', 'wakewords')
+    : path.join(os.homedir(), '.odyssync', 'wakewords');
+}
+
+function createVoice({
+  manager, overlay, ipcMain, globalShortcut, BrowserWindow, appDir, config = {}, notify = () => {},
+  bridge = { send: () => false, onMessage: () => {} }, settingsPath = '', shell = null,
+  wakeFolder = defaultWakeFolder(), getControlWindow = () => null,
+}) {
   const toast = (text) => overlay.send({ type: 'VOICE_TOAST', text });
   let win = null;
   let nextId = 0;
@@ -230,20 +241,107 @@ function createVoice({ manager, overlay, ipcMain, globalShortcut, BrowserWindow,
 
   // ---------- IPC from the Voice window ----------
 
-  const voiceFile = (key) => {
-    const name = config[key];
-    const file = name ? path.join(appDir, 'voice', name) : '';
-    return file && fs.existsSync(file) ? pathToFileURL(file).href : '';
-  };
-  ipcMain.handle('voice:getConfig', () => ({
-    agentId: config.elevenLabsAgentId || '',
-    accessKey: config.picovoiceAccessKey || '',
-    keywordPath: voiceFile('wakeWordFile'),
-    modelPath: voiceFile('wakeModelFile'),
-  }));
+  ipcMain.handle('voice:getConfig', () => ({ agentId: config.elevenLabsAgentId || '' }));
   ipcMain.handle('voice:tool', (_e, name, params) => runTool(name, params));
-  ipcMain.on('voice:state', (_e, state) => { if (STATES.includes(state)) overlay.send({ type: 'VOICE', state }); });
+  ipcMain.on('voice:state', (_e, state) => {
+    if (!STATES.includes(state)) return;
+    overlay.send({ type: 'VOICE', state });
+    const busy = state !== 'idle';
+    if (busy !== inSession) { inSession = busy; pushWake(); } // off during a session, back on after
+  });
   ipcMain.on('voice:notice', (_e, text) => { if (typeof text === 'string' && text) toast(text); });
+
+  // ---------- the wake word (listened for by the Windows helper) ----------
+
+  let saved = loadSettings(); // { enabled, model } as the user chose it
+  let models = []; // [{ id, name, source }] from the helper's last WAKE_WORDS
+  let status = null; // the helper's last WAKE_WORD_STATUS: { enabled, model?, error? }
+  let inSession = false; // true while the voice is listening, thinking or speaking
+  let lastSent = null; // the SET_WAKE_WORD this helper connection last got, as text
+
+  function loadSettings() {
+    try {
+      const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      return { enabled: s.enabled !== false, model: typeof s.model === 'string' ? s.model : null };
+    } catch {
+      return { enabled: true, model: null };
+    }
+  }
+  function saveSettings() {
+    if (!settingsPath) return;
+    try {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(settingsPath, JSON.stringify(saved));
+    } catch (err) { console.log('[voice] could not save wake settings: ' + err.message); }
+  }
+  const has = (id) => models.some((m) => m.id === id);
+  // The saved choice if the helper has it, else Hey Odyssync, else Hey Jarvis, else the first.
+  function currentModel() {
+    if (!models.length) return saved.model;
+    for (const id of [saved.model, 'hey_odyssync', 'hey_jarvis']) if (id && has(id)) return id;
+    return models[0].id;
+  }
+  const wakeSettings = () => ({ enabled: saved.enabled, model: currentModel(), models, status });
+  function tellControl() {
+    const w = getControlWindow();
+    if (w && !w.isDestroyed()) w.webContents.send('voice:wakeSettings', wakeSettings());
+  }
+  // Tell the helper what to listen for, unless it already knows.
+  function pushWake() {
+    const model = currentModel();
+    if (!model) return; // wait for the helper's list
+    const msg = { type: 'SET_WAKE_WORD', enabled: saved.enabled && !inSession, model };
+    const text = JSON.stringify(msg);
+    if (text !== lastSent && bridge.send(msg)) lastSent = text;
+  }
+  const listWake = () => bridge.send({ type: 'LIST_WAKE_WORDS' });
+
+  bridge.onMessage((msg) => {
+    switch (msg.type) {
+      case 'SIDECAR_READY': // a (re)connected helper knows nothing yet
+        lastSent = null;
+        listWake();
+        pushWake();
+        return;
+      case 'WAKE_WORDS':
+        models = Array.isArray(msg.models) ? msg.models.filter((m) => m && typeof m.id === 'string') : [];
+        pushWake();
+        tellControl();
+        return;
+      case 'WAKE_WORD_STATUS':
+        status = { enabled: !!msg.enabled, ...(msg.model ? { model: msg.model } : {}), ...(msg.error ? { error: msg.error } : {}) };
+        tellControl();
+        return;
+      case 'WAKE_WORD': // same as the hotkey, but quiet when it cannot start
+        if (inRoom() && !inSession && win && !win.isDestroyed()) win.webContents.send('voice:start');
+        return;
+      default:
+    }
+  });
+
+  ipcMain.handle('voice:getWakeSettings', () => {
+    listWake(); // a newly dropped file shows up via the WAKE_WORDS answer
+    return wakeSettings();
+  });
+  ipcMain.handle('voice:setWakeSettings', (_e, next = {}) => {
+    const n = next && typeof next === 'object' ? next : {};
+    if (n.model !== undefined && n.model !== null && !has(n.model)) return { ...wakeSettings(), error: 'That wake word is not available' };
+    saved = { enabled: n.enabled === undefined ? saved.enabled : !!n.enabled, model: n.model || currentModel() };
+    saveSettings();
+    pushWake();
+    tellControl();
+    return wakeSettings();
+  });
+  ipcMain.handle('voice:openWakeFolder', async () => {
+    try {
+      fs.mkdirSync(wakeFolder, { recursive: true });
+      const err = shell ? await shell.openPath(wakeFolder) : '';
+      listWake();
+      return err ? { ok: false, error: err, folder: wakeFolder } : { ok: true, folder: wakeFolder };
+    } catch (err) {
+      return { ok: false, error: err.message, folder: wakeFolder };
+    }
+  });
 
   // ---------- the hidden window and the hotkey ----------
 
@@ -268,6 +366,7 @@ function createVoice({ manager, overlay, ipcMain, globalShortcut, BrowserWindow,
     window: () => win,
     runTool,
     hotkey: onHotkey,
+    wakeSettings,
     stop: () => globalShortcut.unregister(HOTKEY),
   };
 }

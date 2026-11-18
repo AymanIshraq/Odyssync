@@ -1,10 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 const { createVoice, summary } = require('./voice');
 
 // Fakes for Electron and the room manager. `people` = other members: [name, mode].
-function setup({ people = [['Rafi', 'collaborative'], ['Charlie', 'collaborative']], inRoom = true, current, sendable, failIds = [] } = {}) {
+function setup({ people = [['Rafi', 'collaborative'], ['Charlie', 'collaborative']], inRoom = true, current, sendable, failIds = [], settingsPath = '', wakeFolder = '' } = {}) {
   const handlers = {}, listeners = {}, events = [], calls = [], shortcuts = {};
   let answerCb = null;
   const members = [{ deviceId: 'me', profile: { displayName: 'Me' } }, ...people.map(([name], i) => ({ deviceId: 'd' + i, profile: { displayName: name } }))];
@@ -31,13 +33,20 @@ function setup({ people = [['Rafi', 'collaborative'], ['Charlie', 'collaborative
     isDestroyed() { return false; }
   }
   const globalShortcut = { register: (k, fn) => { shortcuts[k] = fn; return true; }, unregister: (k) => { delete shortcuts[k]; } };
-  const voice = createVoice({ manager, overlay, ipcMain, globalShortcut, BrowserWindow, appDir: path.join(__dirname, '..'), config: { elevenLabsAgentId: 'agent', wakeWordFile: 'nope.ppn' } });
+  const helper = [], control = [], opened = [];
+  let fromHelper = null;
+  const bridge = { send: (m) => { helper.push(m); return true; }, onMessage: (cb) => { fromHelper = cb; } };
+  const shell = { openPath: async (p) => { opened.push(p); return ''; } };
+  const controlWin = { isDestroyed: () => false, webContents: { send: (ch, data) => control.push([ch, data]) } };
+  const voice = createVoice({ manager, overlay, ipcMain, globalShortcut, BrowserWindow, appDir: path.join(__dirname, '..'), config: { elevenLabsAgentId: 'agent', wakeWordFile: 'nope.ppn' },
+    bridge, shell, settingsPath, wakeFolder, getControlWindow: () => controlWin });
+  const helperSays = (m) => fromHelper(m, null);
   const tool = (name, params) => handlers['voice:tool']({}, name, params);
   const menus = () => events.filter((e) => e.type === 'SEND_MENU');
   const toasts = () => events.filter((e) => e.type === 'VOICE_TOAST').map((e) => e.text);
   const answer = (id, a) => answerCb(id, a);
   const flush = () => new Promise((r) => setTimeout(r, 0));
-  return { voice, tool, events, calls, menus, toasts, answer, flush, handlers, listeners, shortcuts, sent };
+  return { voice, tool, events, calls, menus, toasts, answer, flush, handlers, listeners, shortcuts, sent, helper, control, opened, helperSays };
 }
 
 test('name matching: exact, prefix, contains, none, several, focus', async () => {
@@ -77,7 +86,7 @@ test('voice window: hidden, own preload, microphone only', async () => {
   assert.deepEqual(asked, [true, false]);
   assert.equal(w.check(null, 'media'), true); assert.equal(w.check(null, 'notifications'), false);
   const cfg = await s.handlers['voice:getConfig']();
-  assert.deepEqual(cfg, { agentId: 'agent', accessKey: '', keywordPath: '', modelPath: '' });
+  assert.deepEqual(cfg, { agentId: 'agent' });
 });
 
 test('voice state and notices go to the overlay', () => {
@@ -187,4 +196,89 @@ test('a newer menu replaces the old one; the old answer is ignored', async () =>
 test('summary sentences', () => {
   assert.equal(summary(1, 1, 'Rafi', 'report.docx'), 'Sent report.docx to Rafi');
   assert.equal(summary(0, 1, 'Rafi', 'x', 'Rafi is in Focus mode'), 'Rafi is in Focus mode');
+});
+
+// ---------- the wake word ----------
+
+const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'voice-test-'));
+const MODELS = [{ id: 'alexa', name: 'Alexa', source: 'app' }, { id: 'hey_jarvis', name: 'Hey Jarvis', source: 'app' }, { id: 'hey_odyssync', name: 'Hey Odyssync', source: 'app' }];
+const sets = (s) => s.helper.filter((m) => m.type === 'SET_WAKE_WORD');
+
+test('wake word defaults: on, Hey Odyssync, else Hey Jarvis, else the first', () => {
+  let s = setup();
+  s.helperSays({ type: 'WAKE_WORDS', models: MODELS });
+  assert.deepEqual(s.voice.wakeSettings(), { enabled: true, model: 'hey_odyssync', models: MODELS, status: null });
+  s = setup();
+  s.helperSays({ type: 'WAKE_WORDS', models: MODELS.slice(0, 2) });
+  assert.equal(s.voice.wakeSettings().model, 'hey_jarvis');
+  s = setup();
+  s.helperSays({ type: 'WAKE_WORDS', models: MODELS.slice(0, 1) });
+  assert.equal(s.voice.wakeSettings().model, 'alexa');
+});
+
+test('helper ready: list, then the saved setting; models and status reach the Control Center', () => {
+  const s = setup();
+  s.helperSays({ type: 'SIDECAR_READY' });
+  assert.deepEqual(s.helper, [{ type: 'LIST_WAKE_WORDS' }]); // no model known yet: nothing to set
+  s.helperSays({ type: 'WAKE_WORDS', models: MODELS });
+  assert.deepEqual(sets(s), [{ type: 'SET_WAKE_WORD', enabled: true, model: 'hey_odyssync' }]);
+  s.helperSays({ type: 'WAKE_WORDS', models: MODELS }); // same again: not resent
+  assert.equal(sets(s).length, 1);
+  s.helperSays({ type: 'WAKE_WORD_STATUS', enabled: true, model: 'hey_odyssync' });
+  const last = s.control[s.control.length - 1];
+  assert.equal(last[0], 'voice:wakeSettings');
+  assert.deepEqual(last[1].status, { enabled: true, model: 'hey_odyssync' });
+  s.helperSays({ type: 'SIDECAR_READY' }); // reconnect: sent again
+  assert.deepEqual(s.helper.slice(-2), [{ type: 'LIST_WAKE_WORDS' }, { type: 'SET_WAKE_WORD', enabled: true, model: 'hey_odyssync' }]);
+});
+
+test('settings are saved and come back; an unknown model is refused', async () => {
+  const file = path.join(tmp(), 'sub', 'voice-settings.json');
+  let s = setup({ settingsPath: file });
+  s.helperSays({ type: 'WAKE_WORDS', models: MODELS });
+  const bad = await s.handlers['voice:setWakeSettings']({}, { enabled: true, model: 'nope' });
+  assert.equal(bad.error, 'That wake word is not available'); assert.equal(bad.model, 'hey_odyssync');
+  assert.equal(fs.existsSync(file), false);
+  const r = await s.handlers['voice:setWakeSettings']({}, { enabled: false, model: 'alexa' });
+  assert.deepEqual(r, { enabled: false, model: 'alexa', models: MODELS, status: null });
+  assert.deepEqual(sets(s).at(-1), { type: 'SET_WAKE_WORD', enabled: false, model: 'alexa' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { enabled: false, model: 'alexa' });
+  s = setup({ settingsPath: file });
+  s.helperSays({ type: 'WAKE_WORDS', models: MODELS });
+  assert.deepEqual(s.voice.wakeSettings(), { enabled: false, model: 'alexa', models: MODELS, status: null });
+  const g = await s.handlers['voice:getWakeSettings']();
+  assert.equal(g.model, 'alexa'); assert.deepEqual(s.helper.at(-1), { type: 'LIST_WAKE_WORDS' });
+});
+
+test('WAKE_WORD starts the voice in a room, and is ignored outside one', () => {
+  let s = setup();
+  s.helperSays({ type: 'WAKE_WORD', model: 'hey_jarvis' });
+  assert.deepEqual(s.sent, ['voice:start']);
+  s = setup({ inRoom: false });
+  s.helperSays({ type: 'WAKE_WORD', model: 'hey_jarvis' });
+  assert.deepEqual(s.sent, []); assert.deepEqual(s.toasts(), []);
+});
+
+test('the wake word is off during a voice session and back on after', () => {
+  const s = setup();
+  s.helperSays({ type: 'SIDECAR_READY' });
+  s.helperSays({ type: 'WAKE_WORDS', models: MODELS });
+  s.listeners['voice:state']({}, 'listening');
+  assert.deepEqual(sets(s).at(-1), { type: 'SET_WAKE_WORD', enabled: false, model: 'hey_odyssync' });
+  s.helperSays({ type: 'WAKE_WORD' }); // its own voice: ignored
+  assert.deepEqual(s.sent, []);
+  s.listeners['voice:state']({}, 'speaking');
+  assert.equal(sets(s).length, 2);
+  s.listeners['voice:state']({}, 'idle');
+  assert.deepEqual(sets(s).at(-1), { type: 'SET_WAKE_WORD', enabled: true, model: 'hey_odyssync' });
+});
+
+test('open folder makes the folder, opens it and lists again', async () => {
+  const folder = path.join(tmp(), 'Odyssync', 'wakewords');
+  const s = setup({ wakeFolder: folder });
+  const r = await s.handlers['voice:openWakeFolder']();
+  assert.deepEqual(r, { ok: true, folder });
+  assert.equal(fs.statSync(folder).isDirectory(), true);
+  assert.deepEqual(s.opened, [folder]);
+  assert.deepEqual(s.helper.at(-1), { type: 'LIST_WAKE_WORDS' });
 });
