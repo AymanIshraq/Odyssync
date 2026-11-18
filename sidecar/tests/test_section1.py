@@ -31,6 +31,17 @@ class DragTests(unittest.TestCase):
                 self.assertTrue(fields["cursorAtEdge"])
                 self.assertLessEqual(fields["centerRatio"], 1)
 
+    def test_touch_release_threshold_on_all_edges(self):
+        for edge in ("LEFT", "RIGHT", "TOP", "BOTTOM"):
+            for distance in (19, 20, 21):
+                cursor = {"LEFT": (distance, 400), "RIGHT": (999 - distance, 400),
+                          "TOP": (500, distance), "BOTTOM": (500, 799 - distance)}[edge]
+                with self.subTest(edge=edge, distance=distance):
+                    fields = geometry(sample(cursor=cursor), (1000, 800), {edge})
+                    self.assertEqual(fields["cursorAtEdge"], distance <= 20)
+                    disabled = geometry(sample(cursor=cursor), (1000, 800), set())
+                    self.assertFalse(disabled["cursorAtEdge"])
+
     def test_disabled_and_outside_edges(self):
         self.assertIsNone(geometry(sample(), (1000, 800), set())["edge"])
         self.assertIsNone(geometry(sample(rect=(200, 200, 600, 600)),
@@ -47,8 +58,15 @@ class DragTests(unittest.TestCase):
         self.assertTrue(events[-1]["cursorAtEdge"])
         self.assertIsNone(tracker.qualify(generation, info))
 
-    def test_multitab_or_missing_url_never_starts(self):
-        for count, url in [(2, "https://example.com"), (0, "https://example.com"), (1, "")]:
+    def test_multitab_qualifies_selected_url_and_keeps_real_count(self):
+        tracker, generation = self.begin()
+        result = tracker.qualify(generation, {"hwnd": 10, "url": "https://selected.example", "tabCount": 5})
+        self.assertEqual(result["url"], "https://selected.example")
+        self.assertEqual(result["tabCount"], 5)
+
+    def test_invalid_count_or_missing_url_never_starts(self):
+        for count, url in [(0, "https://example.com"), (-1, "https://example.com"),
+                           (True, "https://example.com"), (None, "https://example.com"), (1, ""), (5, "")]:
             tracker, generation = self.begin()
             self.assertIsNone(tracker.qualify(generation, {"hwnd": 10, "url": url, "tabCount": count}))
 

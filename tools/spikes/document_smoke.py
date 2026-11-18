@@ -80,7 +80,8 @@ def check(app, directory):
         receiver_handle = reply['hwnd']
         assert reply['type'] == 'WINDOW_PLACED'
         assert controller.gui.IsWindowVisible(receiver_handle)
-        print(json.dumps(dict(app=app, capture=True, bytesMatch=True, receiverOpened=True)), flush=True)
+        assert controller.gui.GetWindowPlacement(receiver_handle)[1] == 3, 'Receiver did not maximize'
+        print(json.dumps(dict(app=app, capture=True, bytesMatch=True, receiverOpened=True, receiverMaximized=True)), flush=True)
     finally:
         if receiver_handle:
             if app == 'notepad.exe':

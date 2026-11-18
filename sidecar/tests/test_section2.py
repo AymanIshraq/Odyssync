@@ -92,6 +92,19 @@ class WindowTests(unittest.TestCase):
             result = controller.open_url(open_message(), threading.Event())
         self.assertEqual(result, {"type": "WINDOW_PLACED", "transferId": "test-transfer", "hwnd": 2})
         controller.gui.SetWindowPos.assert_called_once_with(2, 0, 0, 0, 1920, 1040, 0x14)
+        controller.gui.ShowWindow.assert_called_once_with(2, 3)  # SW_SHOWMAXIMIZED
+
+    def test_small_received_window_is_maximized_before_acknowledgement(self):
+        controller = self.controller()
+        controller.window_handles = Mock(return_value={1})
+        controller.browser_windows = Mock(return_value={1: "chrome", 2: "chrome"})
+        controller.launch = Mock()
+        controller.gui.ShowWindow.side_effect = lambda hwnd, state: self.assertEqual((hwnd, state), (2, 3))
+        with patch("sidecar.handoff.find_browser", return_value="chrome.exe"):
+            result = controller.open_url(open_message(x=100, y=100, width=500, height=400), threading.Event())
+        self.assertEqual(result["type"], "WINDOW_PLACED")
+        controller.gui.SetWindowPos.assert_called_once_with(2, 0, 100, 100, 500, 400, 0x14)
+        controller.gui.ShowWindow.assert_called_once_with(2, 3)
 
     def test_default_browser_fallback(self):
         controller = self.controller()
@@ -125,6 +138,61 @@ class WindowTests(unittest.TestCase):
 
 
 class CommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_drag_waits_for_busy_inspector_without_using_stale_result(self):
+        from sidecar.drag import Sample
+
+        for busy_previous_session in (False, True):
+            with self.subTest(busy_previous_session=busy_previous_session):
+                loop = asyncio.get_running_loop()
+                old = loop.create_future()
+                fresh = loop.create_future()
+                fresh.set_result({"hwnd": 20, "browser": "chrome", "url": "https://example.com",
+                                  "title": "Example", "tabCount": 1})
+                finished = asyncio.Event()
+
+                class Desktop:
+                    tick = 0
+
+                    def screen_info(self):
+                        return {"screenWidth": 1920, "screenHeight": 1080, "dpiScale": 1}
+
+                    def sample(self):
+                        self.tick += 1
+                        if self.tick == 6:
+                            old.set_result({"hwnd": 10, "browser": "chrome", "url": "https://old.example",
+                                            "tabCount": 1})
+                        if self.tick >= 10:
+                            finished.set()
+                        hwnd = 10 if self.tick < 4 else 20
+                        return Sample(hwnd, True, (100 - self.tick, 100, 500, 500),
+                                      (0, 120), self.tick != 3, self.tick * .016)
+
+                desktop = Desktop()
+                submitted = []
+
+                def submit(hwnd):
+                    submitted.append(hwnd)
+                    if busy_previous_session and not old.done():
+                        return None
+                    return old if hwnd == 10 else fresh
+
+                reader = Mock()
+                reader.submit.side_effect = submit
+                box = Outbox()
+                task = asyncio.create_task(poll_desktop(desktop, {"LEFT"}, box, reader))
+                try:
+                    await asyncio.wait_for(finished.wait(), 1)
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                events = []
+                while not box.lifecycle.empty():
+                    events.append(box.lifecycle.get_nowait())
+                starts = [event for event in events if event["type"] == "LOCAL_DRAG_START"]
+                self.assertEqual([event["hwnd"] for event in starts], [20])
+                self.assertEqual(starts[0]["url"], "https://example.com")
+                self.assertIn(20, submitted)
+
     async def test_preview_emitted_during_drag_and_stale_capture_dropped(self):
         from sidecar.drag import Sample
 

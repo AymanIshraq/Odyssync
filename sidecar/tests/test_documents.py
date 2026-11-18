@@ -421,6 +421,21 @@ class OpenFileTests(unittest.TestCase):
         self.assertEqual(controller.open_file(open_file_message(self.path), threading.Event())["hwnd"], 3)
         controller.gui.SetWindowPos.assert_not_called()
 
+    def test_new_and_reused_document_windows_maximize_before_acknowledgment(self):
+        for app in ("notepad.exe", "code.exe", "cursor.exe"):
+            for existing in (False, True):
+                with self.subTest(app=app, existing=existing):
+                    before = {9: "other.txt"} if existing else {}
+                    controller = self.controller([before, {9: "report.pdf"}])
+                    controller.launch_document = Mock()
+                    reply = controller.open_file(open_file_message(self.path, app=app), threading.Event())
+                    self.assertEqual(reply["type"], "WINDOW_PLACED")
+                    self.assertEqual(controller.gui.ShowWindow.call_args.args, (9, 3))
+                    if existing:
+                        controller.gui.SetWindowPos.assert_not_called()
+                    else:
+                        controller.gui.SetWindowPos.assert_called_once()
+
     def test_timeout_and_ambiguity_fail(self):
         for snapshots, error in [([{1: "Mail"}] + [{1: "Mail"}] * 3, TimeoutError),
                                  ([{}] + [{8: "A", 9: "B"}] * 3, RuntimeError)]:

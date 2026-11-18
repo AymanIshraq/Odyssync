@@ -102,8 +102,37 @@ class Outbox:
 
 
 async def receive_commands(socket, active, controller=None, outbox=None, executor=None, stopped=None,
-                           desktop=None, lookups=None):
+                           desktop=None, lookups=None, visibility_executor=None):
+    opening = set()
+
+    async def open_window(message):
+        try:
+            opener = controller.open_url if message["type"] == "OPEN_URL" else controller.open_file
+            result = await asyncio.get_running_loop().run_in_executor(executor, opener, message, stopped)
+        except Exception as error:
+            log.warning("Window command %s failed: %s", message["type"], error)
+            result = {"type": "OPEN_FAILED", "transferId": message.get("transferId"), "error": str(error)}
+        outbox.put(result)
+
+    try:
+        await command_stream(socket, active, controller, outbox, executor, stopped, desktop, lookups,
+                             opening, open_window, visibility_executor)
+        await asyncio.gather(*opening)
+    except BaseException:
+        for task in opening:
+            task.cancel()
+        raise
+    finally:
+        await asyncio.gather(*opening, return_exceptions=True)
+
+
+async def command_stream(socket, active, controller, outbox, executor, stopped, desktop, lookups,
+                         opening, open_window, visibility_executor):
     async for raw in socket:
+        for task in list(opening):
+            if task.done():
+                opening.remove(task)
+                task.result()  # Propagate a response-queue failure instead of hiding it.
         try:
             message = json.loads(raw)
             if not isinstance(message, dict):
@@ -143,16 +172,16 @@ async def receive_commands(socket, active, controller=None, outbox=None, executo
                 loop = asyncio.get_running_loop()
                 try:
                     if message["type"] in ("OPEN_URL", "OPEN_FILE"):
-                        opener = controller.open_url if message["type"] == "OPEN_URL" else controller.open_file
-                        result = await loop.run_in_executor(executor, opener, message, stopped)
-                        outbox.put(result)
+                        opening.add(asyncio.create_task(open_window(message)))
                     elif message["type"] == "BOUNCE_WINDOW":
                         await loop.run_in_executor(executor, controller.bounce,
                                                    message.get("hwnd"), message.get("edge"), stopped)
                     else:
                         operation = {"HIDE_WINDOW": controller.hide, "SHOW_WINDOW": controller.show,
                                      "CLOSE_WINDOW": controller.close}[message["type"]]
-                        await loop.run_in_executor(executor, operation, message.get("hwnd"))
+                        # Visibility cannot wait behind a browser that is starting.
+                        lane = visibility_executor if message["type"] in ("HIDE_WINDOW", "SHOW_WINDOW") else executor
+                        await loop.run_in_executor(lane, operation, message.get("hwnd"))
                 except asyncio.QueueFull:
                     raise
                 except Exception as error:
@@ -253,7 +282,8 @@ async def poll_desktop(desktop, active, outbox, reader, previews=None, documents
                             preview_pending = previews.submit(event["hwnd"])
                             preview_generation = tracker.generation
                     outbox.put(event)
-                if requested and requested[0] != tracker.generation:
+                # Keep only the current gesture while the bounded lookup worker is busy.
+                if requested and requested != (tracker.generation, tracker.hwnd):
                     requested = None
                 if requested and pending is None:
                     pending_generation, hwnd = requested
@@ -292,12 +322,14 @@ async def run_session(socket, desktop, reader, controller=None, previews=None, l
     lookups = lookups or LookupReader()
     stopped = threading.Event()
     commands = ThreadPoolExecutor(max_workers=1, thread_name_prefix="window-commands")
+    visibility = ThreadPoolExecutor(max_workers=1, thread_name_prefix="window-visibility")
     await socket.send(json.dumps({"type": "SIDECAR_READY", **desktop.screen_info()}))
     tasks = [asyncio.create_task(receive_commands(socket, active, controller, outbox, commands, stopped,
-                                                  desktop, lookups)),
+                                                  desktop, lookups, visibility)),
              asyncio.create_task(poll_desktop(desktop, active, outbox, reader, previews,
                                               getattr(controller, "documents", None))),
              asyncio.create_task(outbox.send(socket))]
+    tasks.append(asyncio.create_task(socket.wait_closed()))
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
@@ -307,11 +339,15 @@ async def run_session(socket, desktop, reader, controller=None, previews=None, l
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # Drain in-flight visibility calls before restoring; no late hide may
+        # run after disconnect cleanup has already shown the original window.
+        await asyncio.get_running_loop().run_in_executor(visibility, lambda: None)
         # Ordered after any in-flight command so a delayed hide cannot escape
         # restoration. A disconnect is never permission to close the original.
         await asyncio.get_running_loop().run_in_executor(commands, controller.restore_hidden)
         clear_snapshots()
         commands.shutdown(wait=False, cancel_futures=True)
+        visibility.shutdown(wait=False, cancel_futures=True)
         if own_previews:
             previews.close()
         if own_lookups:

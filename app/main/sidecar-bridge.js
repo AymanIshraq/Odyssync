@@ -3,13 +3,13 @@
 // sidecar program on Windows and starts it again if it dies, hands the
 // sidecar's messages to the app, sends commands back, and tells the sidecar
 // which screen edges have a neighbour right now (SET_ACTIVE_EDGES).
-const fs = require('fs');
 const path = require('path');
 const childProcess = require('child_process');
 const { WebSocketServer } = require('ws');
+const { app } = require('electron');
+const { sidecarLaunch } = require('./sidecar-launch');
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
-const DAEMON = path.join(REPO_ROOT, 'sidecar', 'win32_daemon.py');
 const RESTART_MS = 2000;
 
 let server = null; // the WebSocket server
@@ -71,9 +71,16 @@ function pipeLines(stream) {
 function startProcess() {
   restartTimer = null;
   if (stopped) return;
-  console.log('[sidecar] starting python ' + DAEMON);
-  const proc = childProcess.spawn('python', [DAEMON], {
-    cwd: REPO_ROOT,
+  let launch;
+  try {
+    launch = sidecarLaunch({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, repoRoot: REPO_ROOT });
+  } catch (err) {
+    console.log('[sidecar] ' + err.message);
+    return;
+  }
+  console.log('[sidecar] starting ' + launch.command);
+  const proc = childProcess.spawn(launch.command, launch.args, {
+    cwd: launch.cwd,
     windowsHide: true, // no console window
     env: { ...process.env, PYTHONUNBUFFERED: '1' }, // Python prints at once, not in big chunks
   });
@@ -107,7 +114,6 @@ function start() {
   // Start Python only once we own the port, so two copies never start two sidecars.
   server.on('listening', () => {
     if (process.platform !== 'win32') console.log('[sidecar] not Windows, sidecar not started');
-    else if (!fs.existsSync(DAEMON)) console.log('[sidecar] file not found, sidecar not started: ' + DAEMON);
     else startProcess();
   });
 
@@ -130,7 +136,7 @@ function start() {
 
 // For app quit: no more restarts, close the link, then end Python.
 // Closing the link makes the sidecar show again any window it had hidden,
-// so if Python is running we give it 500 ms for that before we end it.
+// Give an in-flight two-second close check time to finish before cleanup.
 // done (optional) is called when all of this is finished.
 function stop(done) {
   stopped = true;
@@ -143,7 +149,7 @@ function stop(done) {
   setTimeout(() => {
     if (child === proc) { proc.kill(); child = null; } // still running: end it now
     if (done) done();
-  }, 500);
+  }, 2500);
 }
 
 // Send one JSON message to the sidecar. false if no sidecar is connected.

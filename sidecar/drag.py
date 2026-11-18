@@ -1,6 +1,8 @@
 """Platform-independent drag lifecycle and physical-pixel edge geometry."""
 
 from dataclasses import dataclass
+
+TRANSFER_EDGE_PX = 20  # Physical-pixel release tolerance for mouse and touch.
 import re
 from urllib.parse import quote, unquote
 
@@ -31,6 +33,18 @@ def local_file_url(value: str):
     return "file:///" + path[0].upper() + quote(path[1:], safe="/:")
 
 
+def new_tab_url(browser: str) -> str:
+    return {"chrome": "chrome://newtab/", "msedge": "edge://newtab/",
+            "brave": "brave://newtab/"}[browser]
+
+
+def is_new_tab_url(value: str) -> bool:
+    # The rendered document can use Chromium's internal new-tab-page alias.
+    return value.strip().lower().rstrip("/") in {
+        f"{scheme}://{page}" for scheme in ("chrome", "edge", "brave")
+        for page in ("newtab", "new-tab-page", "new-tab-page-third-party")}
+
+
 def normalize_url(value: str, browser: str) -> str:
     value = value.strip()
     if not value:
@@ -40,6 +54,8 @@ def normalize_url(value: str, browser: str) -> str:
         return local  # Local file names may contain spaces; web addresses may not.
     if any(character.isspace() for character in value):
         return ""
+    if is_new_tab_url(value):
+        return new_tab_url(browser)
     # Chromium internal pages must retain their browser-specific scheme.
     if "://" in value or value.startswith(("about:", "file:")):
         return value
@@ -106,7 +122,7 @@ def geometry(sample: Sample, screen: tuple[int, int], active: set[str]) -> dict:
             "centerRatio": max(0.0, min(1.0, ratio)),
             "width": right - left, "height": bottom - top,
             "cursorX": x, "cursorY": y,
-            "cursorAtEdge": edge is not None and cursor_distances[edge] <= 4}
+            "cursorAtEdge": edge is not None and cursor_distances[edge] <= TRANSFER_EDGE_PX}
 
 
 class DragTracker:
@@ -161,7 +177,7 @@ class DragTracker:
         return events, request
 
     def qualify(self, generation: int, info: dict):
-        """Accept a one-tab browser result or a document result for this drag."""
+        """Accept the selected browser tab or a document result for this drag."""
         if generation != self.generation or self.hwnd != info.get("hwnd"):
             return None
         if info.get("kind") == "document":
@@ -171,7 +187,7 @@ class DragTracker:
                      "path": info.get("path", ""), "title": info.get("title", ""), "app": info.get("app", ""),
                      **({"error": info["error"]} if info.get("error") else {}),
                      **({"keepSource": True} if info.get("keepSource") else {})}
-        elif info.get("tabCount") != 1 or not info.get("url"):
+        elif type(info.get("tabCount")) is not int or info["tabCount"] < 1 or not info.get("url"):
             return None
         else:
             start = {"type": "LOCAL_DRAG_START", **info}

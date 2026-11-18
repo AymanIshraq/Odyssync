@@ -320,7 +320,7 @@ function createHandoff(ctx) {
 
   // ================= SENDER: the "Send tab" button (a copy: our tab stays open) =================
 
-  let direct = null; // our one direct send in progress: { target, name, done, lookupTimer }
+  let direct = null; // the one tab lookup in progress (ACTIVE_TAB has no id): { target, name, done, lookupTimer }
 
   // Ask our sidecar for the last-used browser tab, then send its URL to this member.
   // Always resolves: { ok: true } once it opened there, else { ok: false, error }.
@@ -329,7 +329,7 @@ function createHandoff(ctx) {
       if (!isMember(target)) return resolve({ ok: false, error: 'That laptop is not in the room' });
       if (!bridge.isConnected()) return resolve({ ok: false, error: 'Odyssync\'s Windows helper is not running' });
       if (modeOf(target) === 'focus') return resolve({ ok: false, error: nameOf(target) + ' is in Focus mode' });
-      if (direct) return resolve({ ok: false, error: 'Still sending the last tab' });
+      if (direct) return resolve({ ok: false, error: 'Still reading your last tab' });
       const d = { target, name: nameOf(target), lookupTimer: null };
       d.done = (answer) => { clearTimeout(d.lookupTimer); if (direct === d) direct = null; resolve(answer); };
       direct = d; // before asking: a quick sidecar can answer at once
@@ -338,12 +338,12 @@ function createHandoff(ctx) {
     });
   }
 
-  // Our sidecar's ACTIVE_TAB answer: commit the tab to the waiting direct send.
+  // Our sidecar's ACTIVE_TAB answer: commit the tab to the waiting direct send. After that it waits in `waiting` like any transfer.
   function onActiveTab(msg) {
     const d = direct;
-    if (!d || d.lookupTimer === null) return; // nobody asked, or already sent: ignore
+    if (!d) return; // nobody asked: ignore
     clearTimeout(d.lookupTimer);
-    d.lookupTimer = null;
+    direct = null; // the lookup is over: the next press may start its own
     if (msg.error !== undefined) return d.done({ ok: false, error: typeof msg.error === 'string' && msg.error ? msg.error : 'Could not read your browser tab' });
     if (typeof msg.url !== 'string' || !/^https?:\/\//i.test(msg.url)) return d.done({ ok: false, error: 'Only web pages can be sent this way' });
     if (!isMember(d.target)) return d.done({ ok: false, error: 'That laptop is not in the room' });

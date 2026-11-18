@@ -1,0 +1,39 @@
+appId: org.odyssync.desktop
+productName: Odyssync
+asar: true
+directories:
+  output: ../dist/windows
+files:
+  - main/**/*.js
+  - server/**/*.js
+  - control/**/*
+  - overlay/**/*
+  - config.json
+  - package.json
+  - '!**/*.test.cjs'
+  - '!**/*.md'
+  - '!control/tests*'
+  - '!control/preview*'
+  - '!control/check_browser.py'
+extraResources:
+  - from: ../dist/sidecar/odyssync-sidecar
+    to: sidecar
+win:
+  target:
+    - target: portable
+      arch: [x64]
+    - target: nsis
+      arch: [x64]
+  # Unsigned local builds must not need administrator-only symlink privileges.
+  signAndEditExecutable: false
+portable:
+  artifactName: Odyssync-${version}-portable.exe
+  requestExecutionLevel: user
+nsis:
+  artifactName: Odyssync-${version}-setup.exe
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true

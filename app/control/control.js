@@ -4,7 +4,7 @@
   const app = document.querySelector('#app');
   const message = document.querySelector('#message');
   let state = {}, view = 'launch', name = '', direct = false, busy = false;
-  let drag = null, transform = null, operation = 0, dialogKind = null, sendingTo = null;
+  let drag = null, transform = null, operation = 0, dialogKind = null, sending = new Set();
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const selfId = () => typeof state.self === 'string' ? state.self : state.self?.deviceId;
   const selfName = () => state.self?.profile?.displayName || state.self?.displayName || '';
@@ -256,22 +256,18 @@
       const member = (state.members || []).find(m=>m.deviceId === s.deviceId);
       const title = member?.profile?.displayName || member?.displayName || (s.deviceId === selfId() ? selfName() : '') || `Laptop ${i+1}`;
       const el = document.createElement('div');
-      el.className = `screen ${state.isHost ? 'host-draggable' : ''} ${s.deviceId === selfId() ? 'self' : ''}`;
+      el.className = `screen ${state.isHost ? 'host-draggable' : ''} ${s.deviceId === selfId() ? 'self' : ''} ${sending.has(s.deviceId) ? 'sending' : ''}`;
       el.dataset.id = s.deviceId;
-      el.innerHTML = `<span class="screen-number">${String(i+1).padStart(2,'0')}</span><div class="device-art" aria-hidden="true">${laptop(['blue','orange','lime','blue'][i%4])}</div><span class="screen-name">${esc(title)}</span><span class="screen-you">${s.deviceId === selfId() ? 'Your laptop' : 'Laptop'}</span>`;
+      el.innerHTML = `<span class="screen-number">${String(i+1).padStart(2,'0')}</span><div class="device-art" aria-hidden="true">${laptop(['blue','orange','lime','blue'][i%4])}</div><span class="screen-name">${esc(title)}</span><span class="screen-you">${s.deviceId === selfId() ? 'Your laptop' : sending.has(s.deviceId) ? 'Sending…' : 'Right-click: send tab'}</span>`;
       position(el,s); canvas.append(el);
       if (s.deviceId !== selfId() && typeof api.sendDirect === 'function') {
-        const b = document.createElement('button'); b.type = 'button'; b.className = 'send-tab';
-        b.textContent = sendingTo === s.deviceId ? 'Sending…' : 'Send tab'; b.setAttribute('aria-label',`Send your browser tab to ${title}`);
-        const focus = state.modes?.[s.deviceId] === 'focus'; b.disabled = !!sendingTo || focus; if (focus) b.title = 'In Focus mode';
-        ['pointerdown','keydown','click'].forEach(type => b.addEventListener(type,e => e.stopPropagation()));
-        b.onclick = async () => {
-          if (sendingTo) return; sendingTo = s.deviceId; paintCanvas();
-          try { const r = await api.sendDirect(s.deviceId); notify(r?.ok ? `Tab sent to ${title}` : r?.error || 'Could not send the tab.'); }
-          catch (e) { notify('Could not send the tab.'); }
-          finally { sendingTo = null; paintCanvas(); }
+        const id = s.deviceId; el.tabIndex = 0; el.title = 'Right-click to send your browser tab';
+        el.oncontextmenu = async e => {
+          e.preventDefault(); if (sending.has(id)) return; sending.add(id); paintCanvas();
+          try { const r = await api.sendDirect(id); notify(r?.ok ? `Tab sent to ${title}` : r?.error || 'Could not send the tab.'); }
+          catch (err) { notify('Could not send the tab.'); }
+          finally { sending.delete(id); paintCanvas(); }
         };
-        el.append(b);
       }
       if (state.isHost) {
         el.tabIndex = 0; el.setAttribute('aria-label',`${title}. Arrow keys select a swap target; Enter swaps.`);

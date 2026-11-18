@@ -1,13 +1,38 @@
 """Native handoff operations. Electron alone decides when a tab may close."""
 
+from contextlib import contextmanager
+import ctypes
 import ntpath
 import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 from urllib.parse import urlsplit
 
+from sidecar.drag import is_new_tab_url, new_tab_url
+
+
+@contextmanager
+def browser_launch_environment():
+    """Do not pass the frozen helper's DLL search path to an installed browser."""
+    if not getattr(sys, "frozen", False):
+        yield
+        return
+    bundle = os.path.normcase(os.path.abspath(sys._MEIPASS))
+    original_path = os.environ.get("PATH", "")
+    ctypes.windll.kernel32.SetDllDirectoryW(None)
+    try:
+        # UI Automation may add its bundled bin directory to PATH as well.
+        os.environ["PATH"] = os.pathsep.join(
+            entry for entry in original_path.split(os.pathsep)
+            if not (os.path.normcase(os.path.abspath(entry.strip('"'))) == bundle
+                    or os.path.normcase(os.path.abspath(entry.strip('"'))).startswith(bundle + os.sep)))
+        yield
+    finally:
+        os.environ["PATH"] = original_path
+        ctypes.windll.kernel32.SetDllDirectoryW(sys._MEIPASS)
 from sidecar.documents import EDITOR_APPS, is_regular_file, title_mentions
 from sidecar.drag import NOT_DOCUMENT_CLASSES
 from sidecar.windows import browser_for_window, process_exe, window_process
@@ -225,15 +250,15 @@ class WindowController:
             self.gui.PostMessage(hwnd, 0x0010, 0, 0)  # WM_CLOSE; browser can veto
             if hwnd not in self.hidden:
                 return
-            # Posting is not confirmation. Give an ordinary close time to finish
-            # without flashing the source back on screen. A veto or slow close
-            # must leave the source visible, including any confirmation dialog.
-            deadline = time.monotonic() + 0.5
-            while self.gui.IsWindow(hwnd):
-                if time.monotonic() >= deadline:
-                    self.show(hwnd)  # Failed restoration retains recovery tracking.
-                    return
-                time.sleep(0.025)
+        # Slow successful closes must stay hidden. Do not hold the controller
+        # lock while waiting: a different window may need to hide immediately.
+        deadline = time.monotonic() + 2.0
+        while self.gui.IsWindow(hwnd):
+            if time.monotonic() >= deadline:
+                self.show(hwnd)  # A real browser veto still needs a visible recovery path.
+                return
+            time.sleep(0.025)
+        with self.lock:
             self.hidden.pop(hwnd, None)
 
     def bounce(self, hwnd, edge, stopped):
@@ -290,10 +315,11 @@ class WindowController:
         return windows
 
     def launch(self, url, executable):
-        if executable:
-            subprocess.Popen([executable, "--new-window", url], shell=False)
-        else:
-            os.startfile(url)
+        with browser_launch_environment():
+            if executable:
+                subprocess.Popen([executable, "--new-window", url], shell=False)
+            else:
+                os.startfile(url)
 
     def open_url(self, message, stopped):
         """Serialized on the command worker. Never claim success for an old window."""
@@ -301,19 +327,43 @@ class WindowController:
         # A preexisting hidden source may be restored while this launch is
         # pending. Visibility changes must never count as a new destination.
         before = self.window_handles()
-        executable = find_browser(message["browser"])
+        target_browser = message["browser"]
+        executable = find_browser(target_browser)
+        url = message["url"]
+        if is_new_tab_url(url):
+            # Internal schemes are not Windows URL handlers. If the sender's
+            # browser is absent, open the receiver browser's own new-tab page.
+            if not executable:
+                for candidate in ("chrome", "msedge", "brave"):
+                    if candidate == target_browser:
+                        continue
+                    executable = find_browser(candidate)
+                    if executable:
+                        target_browser = candidate
+                        break
+            if not executable:
+                raise OSError("No supported browser is installed to open a new tab")
+            url = new_tab_url(target_browser)
         if stopped.is_set():
             raise RuntimeError("Bridge disconnected before browser launch")
-        self.launch(message["url"], executable)
-        deadline = time.monotonic() + 4
+        remaining = 4.0
+        if "expiresAt" in message:
+            remaining = min(remaining, (message["expiresAt"] - time.time() * 1000) / 1000)
+            if remaining <= 0:
+                raise TimeoutError("Open command expired in the queue; no browser was launched")
+        self.launch(url, executable)
+        deadline = time.monotonic() + remaining
         while time.monotonic() < deadline and not stopped.is_set():
             candidates = {hwnd: browser for hwnd, browser in self.browser_windows().items()
-                          if hwnd not in before and (not executable or browser == message["browser"])}
+                          if hwnd not in before and (not executable or browser == target_browser)}
             if len(candidates) > 1:
                 raise RuntimeError("Ambiguous new browser windows; refusing to place an unrelated window")
             if candidates:
                 hwnd = next(iter(candidates))
                 self.place(hwnd, tuple(message[field] for field in ("x", "y", "width", "height")))
+                # First place on the receiver's primary monitor, then maximize.
+                # Source restore/bounce keep their original window dimensions.
+                self.gui.ShowWindow(hwnd, 3)  # SW_SHOWMAXIMIZED
                 return {"type": "WINDOW_PLACED", "transferId": message["transferId"], "hwnd": hwnd}
             stopped.wait(0.05)
         raise TimeoutError("No new browser window appeared within 4 seconds, or bridge disconnected")
@@ -353,7 +403,8 @@ class WindowController:
 
     def launch_file(self, path):
         try:
-            os.startfile(path)  # The file's default program.
+            with browser_launch_environment():
+                os.startfile(path)  # The file's default program.
         except OSError as error:
             # The original message contains the path; replies and logs must not.
             code = getattr(error, "winerror", None) or error.errno
@@ -364,9 +415,10 @@ class WindowController:
         if not executable:
             raise FileNotFoundError("editor not installed")
         try:
-            environment = os.environ.copy()
-            environment.pop("ELECTRON_RUN_AS_NODE", None)
-            subprocess.Popen([executable, "--new-window", path], shell=False, env=environment)
+            with browser_launch_environment():
+                environment = os.environ.copy()
+                environment.pop("ELECTRON_RUN_AS_NODE", None)
+                subprocess.Popen([executable, "--new-window", path], shell=False, env=environment)
         except OSError as error:
             code = getattr(error, "winerror", None) or error.errno
             raise OSError(f"Could not start the editor (error {code})") from None
@@ -382,7 +434,8 @@ class WindowController:
             raise FileNotFoundError("The sender's document application is not installed here")
         # Separate instances make Office startup/window matching deterministic.
         switches = {"winword.exe": ["/n"], "excel.exe": ["/x"]}.get(app, [])
-        subprocess.Popen([executable, *switches, path], shell=False)
+        with browser_launch_environment():
+            subprocess.Popen([executable, *switches, path], shell=False)
 
     def document_windows(self, app):
         windows = self.titled_windows()
@@ -430,6 +483,8 @@ class WindowController:
             if status in ("new", "existing"):
                 if status == "new":
                     self.place(hwnd, tuple(message[field] for field in ("x", "y", "width", "height")))
+                # Match 0.1.4 browser arrivals, including a reused Notepad window.
+                self.gui.ShowWindow(hwnd, 3)  # SW_SHOWMAXIMIZED
                 return {"type": "WINDOW_PLACED", "transferId": message["transferId"], "hwnd": hwnd}
             stopped.wait(0.05)
         if ambiguous:

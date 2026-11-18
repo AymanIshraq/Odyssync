@@ -17,6 +17,9 @@ File 1 (downloading the libraries and making the folders) is left out.
 | 9 | `app/main/room.js` | The **seating chart**: rooms, the guest list, where screens sit, who is next to whom, modes |
 | 10 | `app/main/sidecar-bridge.js` (full) | The **robot phone**: starts Tech 1's Python helper, passes its messages on, sends it commands |
 | 11 | `app/main/handoff.js` | The **traffic lights**: every rule for handing a window to a neighbour without losing it |
+| — | Sending files (`handoff.js`, `app/overlay/dropstrip.js` and wiring) | Drag a file to an edge, drop it on the strip, and a copy lands in the neighbour's `Downloads\Odyssync` |
+| — | Sliding an open document (`handoff.js` and Tech 1's `sidecar/`) | Drag the window of an open PDF, text or Office file to an edge and it opens on the neighbour |
+| — | Sending the file in a VS Code or Cursor tab (`handoff.js` and Tech 1's `sidecar/`) | Drag the editor window to an edge; the front tab's file opens in the same editor on the neighbour, and your window stays |
 
 ---
 
@@ -182,9 +185,12 @@ No shadow around it (a shadow would give away that it's there).
 Nobody can stretch or shrink it.
 
 ```js
-    webPreferences: { preload: path.join(__dirname, 'preload-overlay.js') },
+    // Keep drawing even when the system thinks the overlay is in the background, or its animations can stall.
+    webPreferences: { preload: path.join(__dirname, 'preload-overlay.js'), backgroundThrottling: false },
 ```
 Load the glass window's helper first: `preload-overlay.js` (file 4).
+
+`backgroundThrottling: false` was added later. A computer saves power by slowing down, or pausing, the drawing in windows it thinks nobody is looking at. The glass window is see-through and never "in front" in the usual sense, so the computer sometimes made that mistake, and a sliding picture froze half-way. This setting says: **never slow this window's drawing down.**
 
 ```js
   });
@@ -1541,6 +1547,46 @@ If this laptop has **not answered two taps in a row**: mark the line as `lost`, 
 ```
 Otherwise add 1 to its "not answered" counter (`++` = "add one") and tap it on the shoulder (`ping`). A live laptop answers automatically, which resets the counter to 0. A closed lid or dead Wi-Fi can't answer, so the counter climbs.
 
+### Added for file sending: "busy" also counts as alive
+
+A laptop that is sending or receiving a big file can't answer the shoulder taps in time: the tap, or its answer, is stuck in line behind the file. Without the lines below, the desk dropped such a laptop after about 2 seconds. These lines sit at the start of the "for every phone line" loop, before the "missed two taps?" check.
+
+```js
+const DRAIN_GRACE_MS = 15000; // after a big download's last bytes leave us they are still on the way: give the laptop this long to answer
+```
+(At the top of the file.) A box holding "15 seconds of patience after a download's last piece has left the desk".
+
+```js
+      const tcp = socket._socket || {}; // the raw connection under the WebSocket (may be closing)
+      const read = tcp.bytesRead || 0;
+      const waiting = (tcp._handle && tcp._handle.writeQueueSize) || 0;
+```
+Look underneath the phone line at the raw wire:
+- `read` = how many bytes have **arrived from** this laptop so far
+- `waiting` = how many bytes are still **queued to go out** to it
+
+(`|| 0` and `|| {}` mean "use zero / an empty form if the wire is already closing".)
+
+```js
+      if (waiting === 0 && socket.lastWaiting > 0) socket.graceUntil = Date.now() + DRAIN_GRACE_MS;
+      const inGrace = Date.now() < socket.graceUntil;
+```
+If the queue **just became empty** (it had something last time, nothing now), the last bytes have left the desk but are still travelling to the laptop. Give it 15 seconds from now. `inGrace` = "are we still inside those 15 seconds?"
+
+```js
+      if (read !== socket.lastRead || waiting < socket.lastWaiting || inGrace) socket.missedPings = 0;
+      socket.lastRead = read;
+      socket.lastWaiting = waiting;
+```
+Reset the "taps not answered" counter to zero if **any** of these is true:
+- new bytes arrived from the laptop since the last look (it's **uploading**)
+- the queue to it got shorter (it's **downloading**, really taking the bytes)
+- it's inside the 15-second grace
+
+Then remember both numbers for next time.
+
+Bytes the desk merely *writes* never count. The computer happily accepts our tiny taps even for a dead laptop, so "we sent something" would keep a dead laptop alive forever. A dead laptop's queue never gets shorter and never empties, so it gets none of this and is still dropped within 3 seconds.
+
 ## Closing the desk
 
 ```js
@@ -1685,10 +1731,12 @@ Hang up any old line in that pocket first.
 Hand back a promise: "I'll tell you `true` or `false` soon." `resolve` is how we keep the promise.
 
 ```js
-      const socket = new WebSocket(url);
+      // During a long file upload our answers to the server's pings queue up behind the file;
+      // ws's default limit of 60 waiting answers would make us close our own connection. 0 = no limit.
+      const socket = new WebSocket(url, { maxPendingAutoPongs: 0 });
       sockets[name] = socket;
 ```
-Start dialling, and put the line in the pocket straight away.
+Start dialling, and put the line in the pocket straight away. The setting `maxPendingAutoPongs: 0` was added for file sending. The phone-line toolbox normally hangs up by itself if 60 answers to the desk's shoulder taps are waiting to go out. During a long upload they do pile up behind the file, so that limit is switched off (`0` = no limit).
 
 ```js
       let opened = false;
@@ -3831,6 +3879,871 @@ In UI 1's test file `tests.js`, one expected text changed from the code `bad_pin
 
 ---
 
+# Sending files 📄 (plan item 3)
+
+**The job:** drag a file from File Explorer toward a screen edge that has a neighbour. A **drop strip** lights up along that edge. Let go of the file on the strip, and a copy arrives in the neighbour's `Downloads\Odyssync` folder.
+
+The pieces, and who does what:
+
+```
+ Tech 1's helper ──"a file is being dragged near the RIGHT edge"──▶ handoff.js
+                                                                        │ shows the strip
+                                                                        ▼
+ you drop the file on the strip ◀──────────────────────────── the glass window (dropstrip.js)
+        │ "this file was dropped on RIGHT"
+        ▼
+   handoff.js reads the file ──▶ mail carrier ──▶ front desk ──▶ neighbour's handoff.js
+                                                                        │ saves it in Downloads\Odyssync
+                                                                        ▼ opens the folder, answers "accepted"
+```
+
+Rules agreed for files: **one file** per drag, **50 MB at most**, **no folders**, the sender **keeps** its file (it's a copy), and the three modes work the same as for tabs.
+
+New words:
+
+| Word | What it means |
+|---|---|
+| **Path** | A file's full address on the disk, like `C:\Users\Rafi\Documents\report.docx`. |
+| **Bytes** | A file's raw contents. |
+| **Base name** | Just the file's name without the folders in front: `report.docx`. |
+| **Extension** | The ending after the last dot: `.docx`. |
+| **Regular expression** | A search pattern written between `/ /`, used to find certain characters in text. |
+| **Synchronous (`...Sync`)** | "Do this now and wait until it's finished" (as opposed to `await`). |
+
+## Part 1: the new lines at the top of `handoff.js`
+
+```js
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+```
+Borrow three toolboxes: files 📂, computer facts (to find your home folder), and addresses 🗺️.
+
+```js
+  fileReply: 60000, // sender: no answer to a file in 60 s -> failed
+  fileReplyApproval: 90000, // the same, when the receiver is in approval mode
+  filePayload: 60000, // receiver: the file's bytes must arrive within 60 s of its commit
+```
+Three more waiting times in the list: the sender waits **60 seconds** for an answer about a file (**90** if the receiver has to click Accept), and the receiver waits **60 seconds** for the file's contents after hearing "a file is coming". A tab only gets 5 seconds, but a big file takes longer to travel.
+
+```js
+const MAX_FILE = 50 * 1024 * 1024; // FILE_PAYLOAD is at most 50 MB
+```
+The size limit, written in bytes: 50 × 1024 × 1024 (1024 bytes = 1 KB, 1024 KB = 1 MB).
+
+```js
+const DROP_END_MS = 300; // the drop reaches the overlay about when the button goes up: keep the strip this long
+const DROP_START_MS = 200; // a plain click near the edge looks like a drag for a moment: wait this long before showing the strip
+```
+Two short waits for the drop strip:
+- keep the strip **0.3 s after** the drag seems to end, because the "dropped!" message arrives at about the same moment as "mouse button released"
+- wait **0.2 s before** showing the strip, because an ordinary click near the edge looks like the start of a drag. A click is over before 0.2 s; a real drag isn't.
+
+### Making a file name safe
+
+```js
+// A name that is safe to save on Windows: no folder parts, no illegal characters,
+// no trailing dots or spaces, no device name like CON; "file" if nothing is left.
+function safeName(name) {
+  let s = path.win32.basename(String(name)).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '');
+```
+The file's name comes from another laptop, so we don't trust it blindly:
+- `basename` keeps only the base name, throwing away any folders (so `..\..\evil.txt` becomes `evil.txt` and can't escape the downloads folder)
+- the first `replace` swaps every character Windows forbids in names (`< > : " / \ | ? *` and invisible control characters) for `_`
+- the second `replace` removes dots and spaces from the very end
+
+```js
+  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(s)) s = '_' + s;
+  return s || 'file';
+}
+```
+Windows reserves a few names (`CON`, `NUL`, `COM1`…) for devices; a file can't be called that. If the name is one of those, put `_` in front. If nothing is left at all, call it `file`.
+
+### Saving without ever overwriting
+
+```js
+// Write the bytes as dir/name, else "name (1).ext", "name (2).ext"...: never over an existing file.
+function writeNew(dir, name, bytes) {
+  const ext = path.extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+```
+Split the name into its extension (`.docx`) and the part before it (`report`).
+
+```js
+  for (let i = 0; ; i++) {
+    const full = path.join(dir, i === 0 ? name : `${stem} (${i})${ext}`);
+```
+Try names in order: first the plain name, then `report (1).docx`, `report (2).docx`, and so on.
+
+```js
+    let fd;
+    try {
+      fd = fs.openSync(full, 'wx'); // 'wx' = create it, or fail if the name is taken
+    } catch (err) {
+      if (err.code === 'EEXIST' && i < 999) continue;
+      throw err;
+    }
+```
+Try to **create** the file. `'wx'` means "make a new file, and **refuse** if that name already exists". If it exists (`EEXIST`), go round again with the next number. Any other problem is passed on as a real error.
+
+```js
+    try {
+      fs.writeFileSync(fd, bytes);
+    } catch (err) {
+      fs.closeSync(fd);
+      try { fs.unlinkSync(full); } catch {} // our own half-written file: do not leave it behind
+      throw err;
+    }
+    fs.closeSync(fd);
+    return full;
+  }
+}
+```
+Write the contents in. If writing fails half-way (say the disk is full), close and **delete** the half-written file (`unlink` = delete) so no broken file is left. Otherwise close it and hand back its full address.
+
+### Three more things the handoff brain is given
+
+```js
+  const overlay = { send: () => {}, onAnswer: () => {}, onGhostSettled: () => {}, onFileDropped: () => {}, setDropMode: () => {}, ...ctx.overlay };
+  const notify = ctx.notify || (() => {}); // a notice in the Control Center: notify("error", text)
+  const revealFile = ctx.revealFile || (() => {}); // open Explorer with this file selected
+  const downloadsDir = ctx.downloadsDir || path.join(os.homedir(), 'Downloads', 'Odyssync');
+```
+- the glass window now has two more buttons: "tell me when a file is dropped" and "catch drops / stop catching drops"
+- `notify` shows a short popup in the Control Center
+- `revealFile` opens the folder with a file selected
+- `downloadsDir` is where files are saved: your home folder, then `Downloads`, then `Odyssync`
+
+As before, anything missing is replaced by a dummy that does nothing.
+
+```js
+    if (t.file) {
+      if (result === 'FAILED') notify('error', 'File was not delivered');
+    } else {
+      bridge.send({ type: result === 'PLACED' ? 'CLOSE_WINDOW' : 'SHOW_WINDOW', hwnd: t.hwnd });
+    }
+```
+In the sender's "the ending" recipe: a tab has a hidden window to close or show again. **A file has no window**, so for a file there's nothing to close. If it failed, show the popup "File was not delivered".
+
+## Part 2: the sender, showing the drop strip
+
+```js
+  let dropEdge = null; // the edge whose drop strip is showing, or null
+  let dropEndTimer = null; // the short wait before the strip goes away
+  let dropStartTimer = null; // the short wait before the strip shows
+```
+Three boxes: which edge has the strip right now (none at first), and the two alarm clocks for the short waits.
+
+```js
+  // Show the drop strip on this edge and let the overlay catch the drop; null hides it.
+  function setDropEdge(edge) {
+    clearTimeout(dropEndTimer);
+    dropEndTimer = null;
+    clearTimeout(dropStartTimer);
+    dropStartTimer = null;
+    if (dropEdge === edge) return;
+```
+**"Put the strip on this edge"** (or remove it, if `edge` is empty). Cancel both alarm clocks. If it's already there, do nothing.
+
+```js
+    if (dropEdge) overlay.send({ type: 'FILE_DRAG', role: 'sender', edge: dropEdge, active: false });
+    dropEdge = edge;
+    overlay.setDropMode(!!edge);
+    if (edge) overlay.send({ type: 'FILE_DRAG', role: 'sender', edge, active: true });
+  }
+```
+Tell the glass to remove the old strip, remember the new edge, switch the glass between "catch drops" and "ghost mode", and tell it to show the new strip. `FILE_DRAG` is a new glass message we defined: `active: true` = show, `false` = hide.
+
+```js
+  // Our sidecar: a file is (active) or is no longer dragged near an edge.
+  function onFileDrag(msg) {
+    if (msg.active) {
+      const edge = typeof msg.edge === 'string' && neighbourOn(msg.edge) ? msg.edge : null;
+      if (!edge) return;
+```
+Tech 1's helper says "a file is being dragged near this edge". Only edges with a neighbour count.
+
+```js
+      if (dropEdge) return setDropEdge(edge); // a strip is already showing: follow the drag (also cancels a pending end)
+      // Not showing yet: wait a moment first, so a plain click near the edge never shows the strip.
+      clearTimeout(dropStartTimer);
+      dropStartTimer = setTimeout(() => { if (neighbourOn(edge)) setDropEdge(edge); }, DROP_START_MS);
+      return;
+    }
+```
+If a strip is already showing, move it straight to this edge. If not, **wait 0.2 s first**, and only then show it (if the neighbour is still there).
+
+```js
+    clearTimeout(dropStartTimer); // it ended before the wait was over: it was a click
+    dropStartTimer = null;
+    if (dropEdge && !dropEndTimer) dropEndTimer = setTimeout(() => setDropEdge(null), DROP_END_MS);
+  }
+```
+The helper says "not any more". Cancel a pending "show": it was only a click. If a strip is showing, remove it **0.3 s from now**, leaving time for the drop to arrive.
+
+## Part 3: the sender, the file was dropped
+
+```js
+  // The overlay's drop strip got a file: check it, then send it (TRANSFER_COMMIT + FILE_PAYLOAD).
+  function sendFile(edge, filePath, count) {
+    setDropEdge(null); // the drag is over
+    if (count > 1) return notify('error', 'Drop one file at a time');
+    const target = typeof edge === 'string' ? neighbourOn(edge) : null;
+    if (!target) return;
+```
+Remove the strip. If several files were dropped at once: popup, and stop. Find the neighbour on that edge; if there's none, stop.
+
+```js
+    let stat;
+    try { stat = fs.statSync(filePath); } catch { return notify('error', 'Could not read that file'); }
+    if (!stat.isFile()) return notify('error', 'Folders cannot be sent. Zip the folder first.');
+    if (stat.size > MAX_FILE) return notify('error', 'File is too large (max 50 MB)');
+```
+Ask the disk about the file (`stat` = its facts: size, kind). Three refusals, each with its own popup: can't be read, it's a folder, or it's over 50 MB.
+
+```js
+    const id = crypto.randomUUID();
+    const filename = path.basename(filePath);
+    const receiverMode = modeOf(target);
+    // Rule 3: the receiver is in focus: the file card bounces back and nothing is sent.
+    if (receiverMode === 'focus') return show('BOUNCE', 'sender', edge, id, { kind: 'file', filename, size: stat.size });
+```
+Make a tracking number and take the file's base name. If the neighbour is in **Focus**, play the bounce on my glass and send nothing.
+
+```js
+    let bytes;
+    try { bytes = fs.readFileSync(filePath); } catch { return notify('error', 'Could not read that file'); }
+    if (bytes.length > MAX_FILE) return notify('error', 'File is too large (max 50 MB)'); // it grew meanwhile
+    const size = bytes.length;
+```
+**Read the whole file** into memory. Check the size once more, in case the file grew in the meantime.
+
+```js
+    const sent = transport.sendToPeer(target, {
+      type: 'TRANSFER_COMMIT', transferId: id, kind: 'file', edge, centerRatio: 0.5, width: 320, height: 200, filename, size, direct: false,
+    });
+    if (!sent) return notify('error', 'Could not reach that laptop');
+```
+Send the note "**a file is coming**": its name and size, and a card size of 320 × 200 for the receiver's glass to draw. If the mail carrier says "not sent", show a popup.
+
+```js
+    transport.sendBinaryToPeer(target, { type: 'FILE_PAYLOAD', transferId: id, filename, mimeType: 'application/octet-stream', size }, bytes);
+```
+Then send the **parcel** 📦 with the contents. `application/octet-stream` is the standard label for "some file, kind unknown".
+
+```js
+    show('COMMIT', 'sender', edge, id, {
+      kind: 'file', title: null, url: null, filename, size,
+      fromName: myProfile().displayName, mode: modeOf(selfId()), direct: false,
+    });
+    const t = { id, target, edge, file: true, timer: null };
+    waiting.set(id, t);
+    const ms = receiverMode === 'approval' ? times.fileReplyApproval : times.fileReply;
+    t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), ms);
+  }
+```
+Tell my glass (it shows the file card flying off the edge), put the transfer in the "waiting to hear back" book marked as a file, and set the alarm clock: 60 s, or 90 s for an Approval receiver.
+
+```js
+  overlay.onFileDropped((edge, filePath, count) => sendFile(edge, filePath, count));
+```
+"Glass window, when a file is dropped on the strip, run the recipe above."
+
+## Part 4: the receiver
+
+```js
+    clearTimeout(r.payloadTimer);
+    r.bytes = null;
+```
+Added to the "forget this transfer" recipe: also cancel the "waiting for the contents" alarm clock and let go of the file's contents, so memory is freed.
+
+```js
+    if (msg.kind === 'file') return onFileCommit(r, msg, myMode); // a file needs no sidecar
+```
+In the "sender let go" recipe: a file takes its own path from here. It doesn't need Tech 1's helper, because no browser window has to be opened.
+
+```js
+  function onFileCommit(r, msg, myMode) {
+    const { filename, size } = msg;
+    if (typeof filename !== 'string' || !Number.isInteger(size) || size < 0 || size > MAX_FILE) {
+      forget(r);
+      return reply(r, { type: 'TRANSFER_FAILED', error: 'invalid' });
+    }
+```
+"A file is coming." If the note has no proper name, or a size that isn't a whole number from 0 to 50 MB, refuse it as `invalid`.
+
+```js
+    show('COMMIT', 'receiver', r.edge, r.id, {
+      kind: 'file', title: null, url: null, filename, size,
+      fromName: nameOf(msg.fromId), mode: myMode, direct: !!msg.direct,
+    });
+    r.payloadTimer = setTimeout(() => endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'timeout' }), times.filePayload);
+```
+Tell my glass to show the file card (name, size, who it's from). Set an alarm clock: if the contents haven't arrived in 60 seconds, fail.
+
+```js
+    if (myMode === 'approval') {
+      r.stage = 'file-approval';
+      r.timer = setTimeout(() => endIncoming(r, 'REJECTED', { type: 'TRANSFER_REJECTED', reason: 'timeout' }), times.approval);
+      return;
+    }
+    r.stage = 'file';
+  }
+```
+- **Approval:** wait up to 30 seconds for Accept or Reject.
+- **Collaborative:** the stage is `file`, meaning "save as soon as the contents are here".
+
+```js
+  // The file's bytes arrived (once, from its sender).
+  function onFileBytes(r, bytes) {
+    clearTimeout(r.payloadTimer);
+    if (bytes.length !== r.commit.size) return endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'size mismatch' });
+    r.bytes = bytes;
+    if (r.stage === 'file') saveFile(r);
+  }
+```
+**The contents arrived.** Cancel the alarm. If the size doesn't match what was promised, fail. Otherwise keep the contents, and save now if we're allowed to (in Approval, we wait for the click).
+
+```js
+  // Save into Downloads\Odyssync under a new name, show it in Explorer, tell the sender.
+  function saveFile(r) {
+    let full;
+    try {
+      fs.mkdirSync(downloadsDir, { recursive: true });
+      full = writeNew(downloadsDir, safeName(r.commit.filename), r.bytes);
+    } catch {
+      return endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error: 'could not save' });
+    }
+```
+**Save it.** Make the `Downloads\Odyssync` folder if it isn't there (`mkdir` = make folder), then write the file under a safe name that isn't taken. If that fails, tell the sender "could not save".
+
+```js
+    try { revealFile(full); } catch (err) { console.log('[handoff] could not show the file: ' + err.message); }
+    endIncoming(r, 'PLACED', { type: 'TRANSFER_ACCEPTED' });
+  }
+```
+Open the folder with the new file selected, fade the card on my glass, and answer the sender "accepted".
+
+```js
+    if (!r || (r.stage !== 'approval' && r.stage !== 'file-approval')) return;
+    clearTimeout(r.timer);
+    if (!accepted) return endIncoming(r, 'REJECTED', { type: 'TRANSFER_REJECTED', reason: 'rejected' });
+    if (r.stage === 'approval') return waitForGhost(r);
+    r.stage = 'file'; // a file: save now if the bytes are already here, else when they come
+    if (r.bytes) saveFile(r);
+```
+The Accept/Reject click now handles files too. Reject → throw it away and tell the sender. Accept for a tab → open the tab as before. Accept for a **file** → save it now if the contents are already here; otherwise it's saved the moment they arrive.
+
+```js
+      case 'FILE_PAYLOAD':
+        if (!r || r.from !== msg.fromId || !r.commit || r.commit.kind !== 'file' || r.bytes || !payload) return;
+        return onFileBytes(r, payload);
+```
+A parcel with file contents arrives. It's accepted only if we were told this file was coming, it's from the same sender, and we don't have the contents yet. Anything else is ignored.
+
+```js
+      case 'LOCAL_FILE_DRAG': return onFileDrag(msg);
+```
+Tech 1's helper's "a file is being dragged" message goes to the strip recipe from Part 2.
+
+```js
+    if (dropEdge && !neighbourOn(dropEdge)) setDropEdge(null); // left the room, or the neighbour went
+```
+In "someone left the room": if the strip's neighbour is gone, remove the strip.
+
+## Part 5: the drop strip on the glass, `app/overlay/dropstrip.js` (new, in UI 2's folder)
+
+```js
+(function (root) {
+  const edges = ['LEFT', 'RIGHT', 'TOP', 'BOTTOM'];
+```
+The file is wrapped the same way as UI 2's other overlay files. The four edge names.
+
+```js
+  function geometry(edge, view) {
+    const depth = Math.min(90, edge === 'LEFT' || edge === 'RIGHT' ? view.width : view.height);
+    if (edge === 'LEFT') return { x: 0, y: 0, width: depth, height: view.height };
+    if (edge === 'RIGHT') return { x: view.width - depth, y: 0, width: depth, height: view.height };
+    if (edge === 'TOP') return { x: 0, y: 0, width: view.width, height: depth };
+    return { x: 0, y: view.height - depth, width: view.width, height: depth };
+  }
+```
+**Where the strip goes:** 90 dots deep, running the full length of the chosen edge.
+
+```js
+  function createDropStrip({ document, viewport, api }) {
+    let strip = null;
+    // Chromium opens a file dropped anywhere on a page: outside the strip a drop is refused.
+    document.addEventListener('dragover', event => {
+      if (!event.defaultPrevented && event.dataTransfer) event.dataTransfer.dropEffect = 'none';
+      event.preventDefault();
+    });
+    document.addEventListener('drop', event => event.preventDefault());
+```
+A safety rule for the whole page. Normally, dropping a file onto a web page makes the page **open that file**. That must never happen to the glass. So everywhere outside the strip, a dragged file is told "you can't drop here" (`dropEffect = 'none'`), and a drop does nothing.
+
+```js
+    function remove() { if (strip) { strip.node.remove(); strip = null; } }
+    function receive(e) {
+      if (e?.type !== 'FILE_DRAG' || !edges.includes(e.edge)) return;
+      if (!e.active) { if (strip && strip.edge === e.edge) remove(); return; }
+      if (strip && strip.edge === e.edge) return;
+      remove();
+```
+`remove` takes the strip off the screen. `receive` listens to glass messages and only cares about `FILE_DRAG`: "hide" removes the strip on that edge; "show" does nothing if it's already there, and otherwise clears any old strip first.
+
+```js
+      const edge = e.edge;
+      const node = document.createElement('div'); node.className = 'drop-strip';
+      node.setAttribute('aria-label', 'Drop a file to send it');
+      const label = document.createElement('span'); label.textContent = 'Drop to send';
+      node.append(label);
+      const r = geometry(edge, viewport());
+      node.style.left = `${r.x}px`; node.style.top = `${r.y}px`;
+      node.style.width = `${r.width}px`; node.style.height = `${r.height}px`;
+```
+Build the strip: a box with the words "Drop to send", placed and sized by the `geometry` recipe.
+
+```js
+      node.addEventListener('dragover', event => {
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+      });
+```
+While a file hovers over the strip: "yes, you can drop here, and it will be a **copy**".
+
+```js
+      node.addEventListener('drop', event => {
+        event.preventDefault();
+        const files = event.dataTransfer?.files;
+        if (files && files.length > 0) api.fileDropped(edge, files[0], files.length);
+        remove();
+      });
+      document.body.append(node);
+      strip = { edge, node };
+    }
+```
+**When a file is dropped on the strip:** press the remote's new `fileDropped` button with the edge, the first file, and how many files were dropped. Then remove the strip. The last two lines put the strip on the page and remember it.
+
+```js
+    return { receive, current: () => strip };
+  }
+  if (typeof module !== 'undefined') module.exports = { createDropStrip, geometry };
+  else root.OverlayDropStrip = { createDropStrip };
+})(globalThis);
+```
+Hand back the listener, and share the maker the same two ways UI 2's other files do (for tests, and for the page).
+
+Three small additions to UI 2's other files:
+- `index.html`: one more `<script src="dropstrip.js">` so the page loads the new file
+- `renderer.js`: one line that makes the strip, and one line `dropStrip.receive(event);` that passes every glass message to it
+- `style.css`: one rule, `.drop-strip`, for its look: a dashed blue border, a dark see-through background, small white text, and `pointer-events: auto` so it can catch the drop (the rest of the glass ignores the mouse)
+
+## Part 6: the wiring
+
+**`preload-overlay.js`** (file 4), one new button:
+```js
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
+```
+Also borrow `webUtils`, a small tool that can tell where a dropped file lives on the disk.
+
+```js
+  // A file dropped on the drop strip: main gets its path on disk and how many files were dropped.
+  fileDropped: (edge, file, count) => ipcRenderer.send('overlay:fileDropped', edge, webUtils.getPathForFile(file), count),
+```
+🔘 **"A file was dropped."** The page hands over the dropped file. A web page isn't allowed to know where a file lives, so this helper looks up its **path** and says it into the walkie-talkie on the channel `overlay:fileDropped`, with the edge and the count.
+
+**`room.js`**, in the `wireOverlay` recipe:
+```js
+  let guarded = null; // the overlay window we already stopped from navigating
+  const win = () => {
+    const w = getOverlayWindow();
+    if (!w || w.isDestroyed()) return null;
+    // A file dropped on the overlay must never open in it: the page never leaves.
+    if (guarded !== w) { guarded = w; w.webContents.on('will-navigate', (e) => e.preventDefault()); }
+    return w;
+  };
+```
+"The glass window, if it still exists." The first time it's fetched, a second safety lock goes on: **the glass page may never be replaced by another page** (`will-navigate` = "about to go somewhere else", and we say no).
+
+```js
+  let cardWantsClicks = false;
+  let dropMode = false;
+  const applyMouse = () => { const w = win(); if (w) w.setIgnoreMouseEvents(!(cardWantsClicks || dropMode), { forward: true }); };
+  ipcMain.on('overlay:setInteractive', (_e, on) => { cardWantsClicks = !!on; applyMouse(); });
+```
+The glass now has **two reasons** to stop being a ghost: the Approval card wants clicks, or a file drag wants its drop. Two yes/no boxes hold them. The glass ignores the mouse only when **both** are "no".
+
+```js
+    onFileDropped: (cb) => ipcMain.on('overlay:fileDropped', (_e, edge, path, count) => cb(edge, path, count)),
+    setDropMode: (on) => { dropMode = !!on; applyMouse(); },
+```
+Two more things handed to the handoff brain: "tell me when a file is dropped" and "switch drop-catching on or off".
+
+```js
+function createRoomManager({ relayUrl, localPort, profile: startProfile, bridge, overlay, revealFile }) {
+  const handoff = createHandoff({ transport, getState, bridge, overlay, revealFile, notify: (kind, text) => notify(kind, text) }); // tab and file handoff (handoff.js)
+```
+The room brain is handed `revealFile` and passes it on to the handoff brain, together with its own popup recipe `notify`.
+
+**`index.js`** (file 2), two small changes:
+```js
+const { app, BrowserWindow, screen, ipcMain, shell } = require('electron');
+```
+Also borrow `shell`, Electron's tool for "do what the desktop would do" (open folders, show files).
+
+```js
+..., revealFile: (p) => shell.showItemInFolder(p) });
+```
+Added to the end of the line that makes the room brain: `revealFile` = "open the folder and select this file".
+
+---
+
+# Sliding an open document to a neighbour 📑
+
+**The job:** you have a document open (a PDF in Edge, a text file in Notepad, a Word file). You drag its **window** off the screen edge, exactly like a browser tab, and the document opens on your neighbour's laptop.
+
+A web page can be re-opened anywhere from its address. A document can't: the file only exists on **your** disk. So for a document, the app sends **the file itself**, using the file-sending code from the section above, and then opens the saved copy on the other side.
+
+```
+ your document window ──drag to edge──▶ Tech 1's helper works out WHICH FILE the window shows
+                                              │ "this window shows C:\...\report.pdf"
+                                              ▼
+            handoff.js: sliding picture as for tabs, then on release:
+            hide your window ─▶ send the file ─▶ neighbour saves it in Downloads\Odyssync
+                                                        │ opens it where the picture stopped
+            your window closes ◀── "it opened" ─────────┘
+```
+
+Three kinds of window are covered:
+
+| Level | Where the document is open | How the file is found |
+|---|---|---|
+| 1 | Chrome, Edge or Brave (how Windows opens PDFs) | The address bar holds a `file:///C:/…` address |
+| 2 | Notepad, Adobe Reader and similar | From **how the program was started** (double-clicking a file starts the program with that file's path) |
+| 3 | Word, Excel, PowerPoint | By **asking the Office program** which file belongs to that window |
+
+What stays true: only the **saved** file travels (unsaved typing stays behind), your file is **never deleted**, the limit is **50 MB**, and the three modes work as for tabs.
+
+New words:
+
+| Word | What it means |
+|---|---|
+| **Command line** | The exact words used to start a program, e.g. `notepad.exe C:\notes.txt`. Windows remembers them for every running program. |
+| **COM** | A way for one Windows program to ask another questions ("Word, which documents do you have open?"). |
+| **URL** | An address. `https://…` is a web page; `file:///C:/…` is a file on this computer. |
+| **Allow-list** | A list of the only things that are permitted. Everything not on it is refused. |
+
+## Part 1: the changes in `app/main/handoff.js` (every changed line)
+
+```js
+const url = require('url');
+```
+Borrow the **address toolbox**. It can turn a `file:///…` address into a normal file path and back.
+
+```js
+  fileReply: 70000, // …
+  fileReplyApproval: 100000, // …
+```
+The sender's waiting times for files went up from 60 and 90 seconds to **70 and 100**. The receiver may spend up to 60 seconds waiting for the contents and then about 5 more opening the document, so the sender has to be the more patient one.
+
+```js
+// Files we are willing to open by themselves after receiving them. Anything else
+// (programs, scripts, macro documents, web pages) is only saved and shown in its folder.
+const OPENABLE = new Set(['.pdf', '.txt', '.md', '.log', '.csv', '.json', '.xml', '.rtf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']);
+```
+A **safety allow-list**: the only file endings the app will open by itself after receiving them. Without it, anyone in the room could send a program (`.exe`) or a script and have it **run** on your laptop without a click. Anything not on the list is saved and shown in its folder, never opened.
+
+### The sender: noticing that the drag is a document
+
+```js
+    let doc = null;
+    if (msg.kind === 'document') {
+      if (typeof msg.path !== 'string' || !msg.path) return;
+      doc = { path: msg.path };
+```
+In "a drag started": Tech 1's helper now has a second kind of message. If it says `kind: 'document'`, it must come with the file's path; remember it in a box called `doc`. (No path → ignore the drag.)
+
+```js
+    } else {
+      if (msg.tabCount !== 1 || !msg.url) return;
+      if (/^file:/i.test(msg.url)) {
+        try { doc = { path: url.fileURLToPath(msg.url, { windows: true }) }; } catch { return; }
+      }
+    }
+```
+Otherwise it's a browser drag, with the old rule (one tab, and an address). New: if the address **starts with `file:`**, it's a local file open in the browser. Turn the address into a Windows path (`fileURLToPath`), so `file:///C:/Users/Rafi/My%20Docs/report.pdf` becomes `C:\Users\Rafi\My Docs\report.pdf`. If the address is broken, ignore the drag.
+
+```js
+    drag = { hwnd: msg.hwnd, browser: msg.browser, url: msg.url, title: msg.title, doc, preview: null, transfer: null };
+```
+Remember the drag as before, now with the `doc` box (empty for an ordinary web tab).
+
+The sliding picture and the "it moved" notes are **exactly the same** as for tabs. Nothing changed there.
+
+```js
+    if (t.doc) return commitDocument(t, receiverMode);
+```
+In "the mouse was released", after the unchanged cancel rule and Focus rule: if this drag is a document, take the new path below instead of the tab path.
+
+### The sender: letting go of a document
+
+```js
+  function commitDocument(t, receiverMode) {
+    let stat;
+    try { stat = fs.statSync(t.doc.path); } catch { cancelOutgoing(t); return notify('error', 'Could not read that file'); }
+    if (!stat.isFile()) { cancelOutgoing(t); return notify('error', 'Folders cannot be sent. Zip the folder first.'); }
+    if (stat.size > MAX_FILE) { cancelOutgoing(t); return notify('error', 'File is too large (max 50 MB)'); }
+```
+**Before hiding anything**, check the file: can it be read, is it a real file, is it 50 MB or less? If any check fails: cancel the drag (the neighbour's picture slides away), show a popup, and your window stays exactly where it is.
+
+```js
+    let bytes;
+    try { bytes = fs.readFileSync(t.doc.path); } catch { cancelOutgoing(t); return notify('error', 'Could not read that file'); }
+    if (bytes.length > MAX_FILE) { cancelOutgoing(t); return notify('error', 'File is too large (max 50 MB)'); }
+    const filename = path.win32.basename(t.doc.path);
+    const size = bytes.length;
+    const { centerRatio, width, height } = t.lastMove;
+```
+Read the file's contents, check the size once more, take its base name (`path.win32` = "using Windows' rules for paths"), and take the window's last position and size from the drag.
+
+```js
+    bridge.send({ type: 'HIDE_WINDOW', hwnd: t.hwnd });
+```
+Only now: tell Tech 1's helper to **hide** your document window (hidden, not closed).
+
+```js
+    const sent = transport.sendToPeer(t.target, {
+      type: 'TRANSFER_COMMIT', transferId: t.id, kind: 'file', open: true, ...(t.browser ? { browser: t.browser } : {}), title: t.title,
+      edge: t.edge, centerRatio, width, height, filename, size, direct: false,
+    });
+```
+Send "a file is coming", with two new fields:
+- `open: true` = "**open it** after saving, don't just show the folder"
+- `browser` = which browser it was open in (only added when it was a browser)
+
+```js
+    if (!sent) {
+      bridge.send({ type: 'SHOW_WINDOW', hwnd: t.hwnd });
+      cancelOutgoing(t);
+      return notify('error', 'Could not reach that laptop');
+    }
+```
+If the note couldn't be sent at all: show your window again at once, cancel, and show a popup.
+
+```js
+    transport.sendBinaryToPeer(t.target, { type: 'FILE_PAYLOAD', transferId: t.id, filename, mimeType: 'application/octet-stream', size }, bytes);
+    show('COMMIT', 'sender', t.edge, t.id, {
+      kind: 'tab', title: filename, url: 'file:///' + encodeURIComponent(filename), filename, size,
+      fromName: myProfile().displayName, mode: modeOf(selfId()), direct: false,
+    });
+```
+Send the contents. Then tell your own glass, described as a **tab** (`kind: 'tab'`) so the glass keeps showing the window's **picture** flying off; with `kind: 'file'` it would swap the picture for a plain file card.
+
+```js
+    waiting.set(t.id, t);
+    const ms = receiverMode === 'approval' ? times.fileReplyApproval : times.fileReply;
+    t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), ms);
+  }
+```
+Wait for the answer, with the long alarm clock (70 s, or 100 s for Approval).
+
+```js
+    if (!t.file) bridge.send({ type: result === 'PLACED' ? 'CLOSE_WINDOW' : 'SHOW_WINDOW', hwnd: t.hwnd });
+    if ((t.file || t.doc) && result === 'FAILED') notify('error', 'File was not delivered');
+```
+In "the ending": anything that **has a window** (a tab or a document) gets closed on success or shown again otherwise. A file dropped on the strip has no window. A failed file or document also shows the popup "File was not delivered".
+
+### The receiver: saving and opening
+
+```js
+      kind: msg.open === true ? 'tab' : 'file', …
+```
+In "a file is coming": if the note says `open: true`, the receiver's glass is also told it's tab-like (title = the file name), so the sliding picture stays.
+
+```js
+    if (r.commit.open === true && OPENABLE.has(path.extname(full).toLowerCase())) return openSaved(r, full); // only ordinary documents open by themselves
+```
+In "save it", right after the file is written: if it was sent to be opened **and** its ending is on the allow-list, go and open it. Otherwise carry on as for a dropped file (show it in the folder).
+
+```js
+  function openSaved(r, full) {
+    r.saved = full;
+    if (bridge.isConnected()) return waitForGhost(r);
+```
+Remember where the copy was saved. If Tech 1's helper is connected, take the same road as a tab: wait for the glass to say where the picture stopped, then ask the helper to open a window there.
+
+```js
+    r.stage = 'opening-here';
+    const failed = (error) => { if (incoming.get(r.id) === r) endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error }); };
+    Promise.resolve()
+      .then(() => openFile(full))
+      .then((err) => {
+        if (typeof err === 'string' && err !== '') return failed(err);
+        if (incoming.get(r.id) === r) endIncoming(r, 'PLACED', { type: 'TRANSFER_ACCEPTED' });
+      }, (err) => failed(String((err && err.message) || err)));
+  }
+```
+No helper (for example on a Mac): ask the computer itself to open the file with its usual program (`openFile`). If that reports a problem, tell the sender "failed" (their window comes back). Otherwise tell them "accepted". The `incoming.get(r.id) === r` checks mean "only if this transfer is still going", in case the sender left in the meantime.
+
+```js
+      const box = { x: toPx(rect.x), y: toPx(rect.y), width: toPx(rect.width), height: toPx(rect.height) };
+      const c = r.commit;
+      let cmd;
+      if (!r.saved) cmd = { type: 'OPEN_URL', transferId: r.id, url: c.url, browser: c.browser, ...box };
+      else if (c.browser) cmd = { type: 'OPEN_URL', transferId: r.id, url: url.pathToFileURL(r.saved).href, browser: c.browser, ...box };
+      else cmd = { type: 'OPEN_FILE', transferId: r.id, path: r.saved, ...box };
+      const sent = bridge.send(cmd);
+```
+In "open the real window", the command for Tech 1's helper is now one of three:
+- an ordinary web tab → `OPEN_URL` with the web address (as before)
+- a document that was open **in a browser** → `OPEN_URL` with the **saved copy's** address, in the same browser
+- a document from **another program** → the new `OPEN_FILE` with the saved copy's path, opened in the receiver's usual program for that kind of file
+
+Everything after that (waiting for "the window is open", answering the sender) is the same as for tabs.
+
+**`room.js` and `index.js`:** one added word each (`openFile`) in the two lines that hand things to the handoff brain, plus in `index.js`:
+```js
+openFile: (p) => shell.openPath(p)
+```
+"Open this file with whatever program this computer normally uses for it."
+
+## Part 2: the changes in Tech 1's Python helper (`sidecar/`), piece by piece
+
+These files are Python, not JavaScript, and belong to Tech 1's track. They're explained here by what each piece does, not line by line. **None of this has been run on Windows yet.**
+
+**`drag.py`**
+- `local_file_url` (new): tidies up what the browser's address bar holds for a local file. Whether it's `file:///C:/Users/Rafi/a.pdf`, or just `C:\Users\Rafi\My Docs\a.pdf`, it comes out as one standard address with spaces written as `%20`. Network-share paths are refused.
+- `normalize_url`: tries that tidy-up first. Web addresses are handled exactly as before.
+- `NOT_DOCUMENT_CLASSES` (new): kinds of window that can never be a document, so dragging them is ignored: the desktop, the taskbar, File Explorer, pop-up dialogs, and command-line windows (closing one of those would kill whatever is running in it).
+- `DragTracker.update`: used to react only to browser windows being dragged. Now it reacts to any ordinary program window.
+- `DragTracker.qualify`: accepts a second kind of answer, "this window shows the document at this path", and announces the drag with `kind: "document"`.
+
+**`documents.py`** (new file): works out which file a window shows, and refuses whenever it isn't sure.
+- `read_dragged_window`: the entry point. A browser window goes to the old tab reader; anything else goes to `read_window_document`.
+- `read_window_document`: finds the program behind the window. Word, Excel and PowerPoint are asked directly (level 3). Every other program is looked up by its command line (level 2).
+- `process_command_line`: asks Windows for the exact words the program was started with.
+- `split_command_line`: cuts those words apart the way Windows does (quotes, spaces, backslashes).
+- `choose_document`: picks the file. There must be **exactly one** real file among the start-up words, **and** the window's title must show that file's name. The title check catches the case where the program was started with one file and now shows another.
+- `office_document` / `office_window_path`: ask the running Office program for its open windows, find the one that is this window, and take its document's full path.
+- `office_path`: refuses an Office document that was never saved, or that lives online (OneDrive, SharePoint).
+
+**`handoff.py`**
+- `DocumentWindows` (new): a short list of the document windows this helper itself approved during a drag.
+- `require_browser`: hide, show, close and bounce used to work only on browser windows. They now also work on windows from that list, and still refuse any other window.
+- `open_file` (new) with `choose_opened_window`: opens a received file with the usual program, then looks for the window that shows it. A brand-new window is moved to where the picture stopped. If the program re-used a window it already had, that window is left where it is.
+- `validate_open_file`: checks an `OPEN_FILE` command before doing anything (a real file, whole-number positions, a positive size).
+
+**`win32_daemon.py`**
+- The drag check now uses `read_dragged_window`.
+- `OPEN_FILE` is handled next to `OPEN_URL`, with the same error reporting.
+- When a document drag is announced, its window goes on the approved list.
+
+**`windows.py`**
+- The "which program owns this window?" lookup was split into two small reusable pieces. Its behaviour for browsers is unchanged.
+
+**`tests/test_documents.py`** (new): 40 tests for all the decision-making pieces above, written so they run without Windows.
+
+---
+
+# Sending the file in a VS Code (or Cursor) tab 🧑‍💻
+
+**The job:** you have a code file open in VS Code. You drag the VS Code window to the screen edge. The file in the front tab goes to your neighbour and opens in VS Code there. **Your own VS Code window slides back and stays open**, because it usually holds a whole project.
+
+Two things make a code editor special:
+- **Finding the file.** VS Code is normally started on a folder, so the "how was the program started?" trick from the last section finds nothing. Instead, each laptop changes **one VS Code setting once** so the window title starts with the file's full path, and Tech 1's helper reads the path from the title.
+- **Opening it safely.** A `.py` or `.bat` file opened the normal way might **run**. Opened in an editor it is only **shown**. So files sent from an editor are opened in that same editor, whatever their type.
+
+The setting (VS Code → Settings → search "window title"):
+```
+${dirty}${activeEditorLong}${separator}${rootName}${separator}${profileName}${separator}${appName}
+```
+After that the title bar reads like `C:\proj\src\main.py - proj - Visual Studio Code`.
+
+## The changed lines in `app/main/handoff.js`
+
+```js
+// Code editors. Dragging one of their windows sends the file in its active tab, the window
+// itself stays here, and the neighbour opens the file in the same editor. An editor only
+// shows a file, it never runs it, so any type of file may be opened in one.
+const EDITORS = new Set(['code.exe', 'cursor.exe']);
+```
+The list of programs that count as code editors: VS Code (`code.exe`) and Cursor (`cursor.exe`). Adding another editor later means adding one name here (and one in Tech 1's helper).
+
+```js
+      doc = { path: msg.path, editor: EDITORS.has(msg.app) ? msg.app : null };
+```
+In "a drag started": Tech 1's helper says which program the window belongs to (`msg.app`). If it's on the editors list, remember that in `doc.editor`. Otherwise `editor` stays empty and the drag is an ordinary document.
+
+```js
+    const editor = t.doc.editor;
+    if (editor) bridge.send({ type: 'BOUNCE_WINDOW', hwnd: t.hwnd, edge: t.edge });
+    else bridge.send({ type: 'HIDE_WINDOW', hwnd: t.hwnd });
+```
+In "letting go of a document": an ordinary document's window is **hidden** (to be closed later). An editor's window is told to **bounce back** onto your screen instead. It is never hidden.
+
+```js
+      ...(editor ? { app: editor } : {}),
+```
+The "a file is coming" note gets one more field for an editor drag: `app`, the editor's name, so the receiver knows to open it in the same editor.
+
+```js
+      if (!editor) bridge.send({ type: 'SHOW_WINDOW', hwnd: t.hwnd });
+```
+If the note couldn't be sent: an ordinary document's hidden window is shown again. An editor window was never hidden, so nothing is needed.
+
+```js
+    if (!t.file && !(t.doc && t.doc.editor)) bridge.send({ type: result === 'PLACED' ? 'CLOSE_WINDOW' : 'SHOW_WINDOW', hwnd: t.hwnd });
+```
+In "the ending": tabs and ordinary documents get their window closed (success) or shown again (failure). A dropped file has no window, and **an editor window is left completely alone**.
+
+```js
+    r.editor = msg.open === true && EDITORS.has(msg.app) ? msg.app : null;
+```
+On the receiver, in "a file is coming": note the editor's name, but **only** if it's one of the two on our list. Any other program name in that field is ignored, so another laptop can't ask yours to start an arbitrary program.
+
+```js
+    const editorHere = r.editor && bridge.isConnected();
+    if (r.commit.open === true && (editorHere || OPENABLE.has(path.extname(full).toLowerCase()))) return openSaved(r, full);
+    delivered(r, full);
+```
+In "save it": go on to open the file if it was sent to be opened **and** either its type is on the safe list, **or** it came from an editor and Tech 1's helper is here to open it in that editor. Otherwise it's simply "delivered" (shown in its folder).
+
+```js
+  function delivered(r, full) {
+    try { revealFile(full); } catch (err) { console.log('[handoff] could not show the file: ' + err.message); }
+    endIncoming(r, 'PLACED', { type: 'TRANSFER_ACCEPTED' });
+  }
+```
+"Delivered, but not opened": open the folder with the file selected, fade the card, and tell the sender "accepted". (These lines existed before; they were given a name so they can be reused below.)
+
+```js
+    else if (r.editor) cmd = { type: 'OPEN_FILE', transferId: r.id, path: r.saved, ...box, app: r.editor }; // the same code editor
+```
+In "open the real window": a fourth kind of command. For an editor file, `OPEN_FILE` carries `app`, which tells Tech 1's helper "open this **in VS Code** (or Cursor), in a new window".
+
+```js
+  function openFailed(r, error) {
+    if (r.editor) return delivered(r, r.saved);
+    endIncoming(r, 'FAILED', { type: 'TRANSFER_FAILED', error });
+  }
+```
+What to do when the window couldn't be opened. For everything else, it's a failure (the sender's window comes back). For an **editor file**, the file is already safely saved and the sender kept their window anyway, so it counts as delivered: show it in the folder. This is what happens when the other laptop doesn't have VS Code installed.
+
+## The changes in Tech 1's Python helper, piece by piece
+
+**`documents.py`**
+- A short list of editor programs (`code.exe`, `cursor.exe`).
+- `editor_title_path` (new): reads the file's path from an editor's window title. It removes the "unsaved" dot at the front, then tries the longest piece of the title that is a real file on the disk, then shorter pieces, because a path can itself contain " - ". If no piece is a real file (the setting is missing, the tab is untitled, or the file lives on a remote machine), it refuses.
+- `read_window_document`: for an editor window, uses that title reading instead of the command line.
+
+**`handoff.py`**
+- `validate_open_file`: accepts the new optional `app` field, but only the two editor names.
+- A lookup for where the editor is installed on this laptop.
+- `open_file`: when `app` is given, starts that editor with "new window" and the file's path, instead of the file's usual program. If the editor isn't installed, it reports that.
+
+---
+
 ## The whole picture now 🧩
 
 ```
@@ -3849,3 +4762,343 @@ In UI 1's test file `tests.js`, one expected text changed from the code `bad_pin
 ```
 
 **Next up:** putting the front desk on Railway, then the first real test on Windows laptops with Tech 1's helper.
+
+
+---
+
+# Sending a tab with the Send tab button 🔘
+
+**The job:** every other person's card in the Control Center now has a small **Send tab** button. Press it and the web page you last used in your browser opens on that person's laptop. **Your own tab stays open**, because this is a copy, not a move. Only web pages (links starting with `http` or `https`) can be sent this way.
+
+## Part 1: the button in `app/control/control.js`
+
+```js
+let drag = null, transform = null, operation = 0, dialogKind = null, sendingTo = null;
+```
+One more labelled box: `sendingTo`. It remembers **who we are sending a tab to right now**. `null` means we are not sending anything.
+
+```js
+if (s.deviceId !== selfId() && typeof api.sendDirect === 'function') {
+```
+"Only add a button if this card is **not mine**, and the remote control has a send recipe." You never send a tab to yourself, so your own card gets no button.
+
+```js
+const b = document.createElement('button'); b.type = 'button'; b.className = 'send-tab';
+```
+Make a new button and call it `b`. Its style name is `send-tab`, so the looks rules below find it.
+
+```js
+b.textContent = sendingTo === s.deviceId ? 'Sending…' : 'Send tab'; b.setAttribute('aria-label',`Send your browser tab to ${title}`);
+```
+The words on the button. If we are sending to **this** person right now, it says "Sending…". Otherwise it says "Send tab". The second part is a hidden label that screen readers say out loud, like "Send your browser tab to Rafi".
+
+```js
+const focus = state.modes?.[s.deviceId] === 'focus'; b.disabled = !!sendingTo || focus; if (focus) b.title = 'In Focus mode';
+```
+First: is that person in Focus mode? Then the button is **greyed out** (cannot be pressed). It is also greyed while any send is going on, so you cannot press two at once. If it is greyed because of Focus, hovering shows the words "In Focus mode".
+
+```js
+['pointerdown','keydown','click'].forEach(type => b.addEventListener(type,e => e.stopPropagation()));
+```
+For a mouse press, a key press and a click: **stop the press from travelling on to the card underneath**. This matters because the card is draggable for the host. Without this, pressing the button would start dragging the card instead.
+
+```js
+b.onclick = async () => {
+```
+What happens when the button is pressed. (`async` means "this recipe can wait for an answer".)
+
+```js
+if (sendingTo) return; sendingTo = s.deviceId; paintCanvas();
+```
+If a send is already going, do nothing. Otherwise write down who we are sending to, and redraw the cards, so the button now says "Sending…" and every button turns grey.
+
+```js
+try { const r = await api.sendDirect(s.deviceId); notify(r?.ok ? `Tab sent to ${title}` : r?.error || 'Could not send the tab.'); }
+```
+Ask the remote control to send, and **wait for the answer**. If the answer says all went well, show the message "Tab sent to Rafi". If not, show the reason it gave, or, if there is none, "Could not send the tab."
+
+```js
+catch (e) { notify('Could not send the tab.'); }
+```
+If something broke on the way, show the plain message.
+
+```js
+finally { sendingTo = null; paintCanvas(); }
+```
+Whatever happened: forget who we were sending to and redraw the cards, so the button goes back to "Send tab".
+
+```js
+el.append(b);
+```
+Put the button onto the card.
+
+## Part 2: the looks, in `app/control/styles.css`
+
+```css
+.send-tab{position:absolute;top:6px;right:6px;z-index:1;min-height:0;padding:3px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--text);font-size:10px;line-height:1.3}
+```
+How the button looks: pinned to the **top-right corner** of the card (6 dots from the top and from the right), drawn above the card, small, with a thin outline, rounded corners and the app's usual colours.
+
+```css
+.send-tab:hover:not(:disabled){border-color:var(--cobalt)}
+```
+When the mouse is over a button that can be pressed, its outline turns blue.
+
+```css
+.send-tab:disabled{cursor:not-allowed}
+```
+A greyed button shows a "not allowed" mouse pointer.
+
+```css
+@container(max-height:115px){.send-tab{top:3px;right:3px;padding:2px 6px;font-size:9px}}
+@container(max-height:65px){.send-tab{top:2px;right:2px;padding:1px 4px;font-size:8px}}
+```
+If the card is made small, the button shrinks and moves closer to the corner so it still fits. The first rule is for small cards, the second for very small ones.
+
+## Part 3: the pretend remote control, `app/control/preview-api.js`
+
+```js
+async sendDirect(deviceId){await new Promise(r=>setTimeout(r,600));return {ok:true};},
+```
+The preview page has no real app behind it, so this is a pretend. It waits 0.6 seconds (so you can see "Sending…") and then says "it worked".
+
+## Part 4: `app/main/room.js`
+
+```js
+function sendDirect(targetDeviceId) {
+  if (!room) return Promise.resolve({ ok: false, error: 'You are not in a room' });
+  return handoff.sendDirect(targetDeviceId);
+}
+```
+This used to be an empty placeholder that only wrote a note. Now: if you are not in a room, answer straight away "You are not in a room". Otherwise pass the job to the traffic lights (`handoff.js`) and hand back its answer.
+
+## Part 5: `app/main/handoff.js`
+
+```js
+let direct = null;
+```
+A box for **our one send in progress**. It holds who we send to, their name, a "finished" recipe and a stopwatch. Empty means nothing is going on.
+
+**`sendDirect(target)`**, the start of a send. It checks things in order and refuses with a sentence at the first problem:
+- The person is not in the room any more: "That laptop is not in the room".
+- Tech 1's Python helper is not connected: "Odyssync's Windows helper is not running".
+- The person is in Focus mode: "(name) is in Focus mode".
+- We are already sending: "Still sending the last tab".
+
+If all is fine, it makes a note card for this send, **writes it into the `direct` box before asking** (a quick helper can answer at once, and the answer must find it), and starts a **2.5-second stopwatch**. Then it asks the helper "what is the last browser tab?" If the helper does not answer within 2.5 seconds, the send ends with "Could not read your browser tab". If the question cannot even be sent, it ends with the "helper is not running" sentence.
+
+**`onActiveTab(msg)`**, the helper's answer. It checks things one by one:
+- Nobody is waiting, or we already got an answer: ignore it. This stops a late or repeated answer from sending twice.
+- Stop the 2.5-second stopwatch, because the answer came.
+- The helper says it had an error: end with the helper's words, or "Could not read your browser tab".
+- The address is missing or does not start with `http://` or `https://`: end with "Only web pages can be sent this way". Only web pages are allowed, because opening other kinds of address (like a file or a program) on someone else's laptop could be unsafe.
+- The person left the room meanwhile: "That laptop is not in the room".
+- The person switched to Focus meanwhile: "(name) is in Focus mode".
+
+Then it picks the **edge**. It looks at who is next to you. If the person sits beside you on the layout, it uses the real side of your screen that faces them (left, right, top or bottom). If they do not sit beside you, it uses **no edge**, and the window then arrives on **their right** side.
+
+```js
+const t = { id: crypto.randomUUID(), target: d.target, name: d.name, direct: true, done: d.done, timer: null };
+waiting.set(t.id, t);
+```
+A fresh transfer card with its own unique number, marked `direct: true`. It goes on the "waiting for an answer" list **before** the message leaves, again so a quick answer finds it.
+
+```js
+t.timer = setTimeout(() => finishOutgoing(t, 'FAILED'), receiverMode === 'approval' ? times.replyApproval : times.reply);
+```
+A stopwatch for the answer: **5 seconds** normally, or **35 seconds** if the other person is in Approval mode, because a human has to press Accept. If it runs out, the send counts as failed.
+
+```js
+transport.sendToPeer(t.target, { type: 'TRANSFER_COMMIT', ..., kind: 'tab', edge: side ? side.toUpperCase() : null, centerRatio: 0.5, width: 1280, height: 800, url: msg.url, title: msg.title, browser: msg.browser, direct: true });
+```
+Send the note "here is a tab" to that person: the address, its title, which browser, the edge (or none), the window in the middle of the edge, a size of **1280 by 800**, and a flag `direct: true` saying "this was sent with the button, not by dragging".
+
+```js
+if (!sent && waiting.has(t.id)) { ...; d.done({ ok: false, error: 'Could not reach that laptop' }); }
+```
+If the note could not be sent at all, stop the stopwatch, remove the card from the waiting list and end with "Could not reach that laptop".
+
+**The guard in `finishOutgoing`** (the ending):
+```js
+if (t.direct) return t.done(result === 'PLACED' ? { ok: true } : { ok: false, error: result === 'REJECTED' ? t.name + ' declined the tab' : 'The tab could not be opened on ' + t.name + '\'s laptop' });
+```
+For a direct send, the ending is short: **answer the button and stop**. If it worked, `{ ok: true }`. If the other person pressed Decline, "(name) declined the tab". Anything else: "The tab could not be opened on (name)'s laptop". **No window is closed or shown again**, because nothing was hidden: it was a copy and your own tab never moved. It also skips the overlay picture, because there was no dragging.
+
+**The one-line change in `onCommit`** (on the other laptop):
+```js
+const r = incomingFor(msg.transferId, msg.fromId, msg.edge || (msg.direct ? 'LEFT' : null));
+```
+When the note arrives, "which edge did it come from?" If the note has an edge, use it. If it has none **and** it came from the button, pretend it came from the sender's **LEFT**, which means it shows up on this laptop's **right** side. Otherwise nothing changes.
+
+```js
+case 'ACTIVE_TAB': return onActiveTab(msg);
+```
+A new entry in the list of messages from the Python helper: when it says `ACTIVE_TAB`, hand it to `onActiveTab`.
+
+```js
+return { onPeerMessage, roomChanged, sendDirect };
+```
+The list of recipes that `handoff.js` offers to the rest of the app now includes `sendDirect`, so `room.js` can call it.
+
+## Two things added that are not in the written contract
+
+- `sendDirect` now always gives back `{ ok: true }` when the tab opened, or `{ ok: false, error }` with a sentence when it did not. The Control Center needs this to show the message.
+- A direct `TRANSFER_COMMIT` (the "here is a tab" note) may carry `edge: null`, meaning "the person is not beside you". The written contract always had a real edge there.
+
+**Status:** built and tested on a Mac with a pretend Windows helper. It has **not** been run on Windows yet.
+
+
+---
+
+# Right-click a card to send your tab (the button is gone) 🖱️
+
+**The job:** the small **Send tab** button on each card has been **removed**. Now you **right-click** another person's card in the Control Center and the web page you last used in your browser opens on their laptop. Your own tab stays open (still a copy, not a move). Only web pages work, same as before. It works for the host and for ordinary members alike.
+
+**Heads up:** the older section "Sending a tab with the Send tab button" above is now **partly out of date**. Everything it says about a button (the button's looks, its greying out, its words) no longer applies. The rest, the sending of the tab itself, still holds. That older section was left as it was on purpose.
+
+Four files changed: `app/control/control.js`, `app/control/styles.css`, `app/main/handoff.js` and `app/main/room.js`.
+
+## Part 1: `app/control/control.js`
+
+```js
+let drag = null, transform = null, operation = 0, dialogKind = null, sending = new Set();
+```
+The old labelled box `sendingTo` held **one** name (or empty). The new box is called `sending` and holds a **list of people** (a `Set` is a list that never writes the same name twice). It remembers **everyone we are sending a tab to right now**. This means you can right-click several people one after another without waiting.
+
+```js
+el.className = `screen ${state.isHost ? 'host-draggable' : ''} ${s.deviceId === selfId() ? 'self' : ''} ${sending.has(s.deviceId) ? 'sending' : ''}`;
+```
+This sets the style names of a card. The first three parts are unchanged. The new last part asks: "Is this person on the `sending` list?" If yes, the card gets the style name `sending`, which the looks rules in Part 2 turn blue. If not, nothing is added.
+
+```js
+... <span class="screen-you">${s.deviceId === selfId() ? 'Your laptop' : sending.has(s.deviceId) ? 'Sending…' : 'Right-click: send tab'}</span>
+```
+This is the small caption on the card. Three cases, checked in order:
+- It is **your own** card: it says "Your laptop".
+- It is someone else and we are sending to them right now: it says "Sending…".
+- Otherwise it says "Right-click: send tab", a hint so people discover the trick now that there is no button.
+
+```js
+if (s.deviceId !== selfId() && typeof api.sendDirect === 'function') {
+```
+"Only do the next part if this card is **not mine** and the remote control has a send recipe." This is why **your own card has no right-click**: you never send a tab to yourself.
+
+```js
+const id = s.deviceId; el.tabIndex = 0; el.title = 'Right-click to send your browser tab';
+```
+Three small things. `id` is a short name for this person's ID. `tabIndex = 0` lets the card be reached with the Tab key on the keyboard. `title` is the little yellow tooltip that appears when you hover the card for a moment: "Right-click to send your browser tab".
+
+```js
+el.oncontextmenu = async e => {
+```
+"When someone **right-clicks** this card, do the following." (The computer calls a right-click a "context menu" event.) `async` means the steps may wait for answers.
+
+```js
+e.preventDefault(); if (sending.has(id)) return; sending.add(id); paintCanvas();
+```
+Four steps in a row:
+1. `e.preventDefault()` stops the **usual right-click menu** (Copy, Paste, Inspect...) from popping up. We want our own meaning for a right-click.
+2. If this person is **already** on the sending list, stop here, so a double right-click does not send twice.
+3. Otherwise add them to the list.
+4. Redraw the cards (`paintCanvas`) so the card turns blue and says "Sending…".
+
+```js
+try { const r = await api.sendDirect(id); notify(r?.ok ? `Tab sent to ${title}` : r?.error || 'Could not send the tab.'); }
+```
+"Try this": ask the remote control to send the tab to that person, and **wait** for the answer `r`. Then show a message at the bottom. If the answer says it worked, the message is "Tab sent to Rafi" (with their name). If not, show the reason the answer gave, or, if it gave none, "Could not send the tab."
+
+```js
+catch (err) { notify('Could not send the tab.'); }
+```
+"If something went badly wrong while trying", show "Could not send the tab."
+
+```js
+finally { sending.delete(id); paintCanvas(); }
+```
+"Whatever happened, at the end": take the person **off** the sending list and redraw, so the card goes back to normal.
+
+**The old lines that are gone:** the whole button (making it, its words, its greying out, the lines that stopped clicks reaching the card underneath, and the `el.append(b)` that stuck it onto the card) was deleted. None of it is needed now.
+
+**Why a right-click never moves a card:** on the host's screen, cards can be dragged around to rearrange the room. That drag only listens to the **left** mouse button. A right-click is a different button, so it never starts a drag and never moves a card, even though the host's cards are draggable.
+
+## Part 2: `app/control/styles.css` (the looks)
+
+**Removed:** four rules that only styled the old button (its place at the card's top-right corner, its border changing when hovered, its not-allowed look when greyed out, and the two "make it smaller on short cards" rules). With no button, they would style nothing.
+
+**Added, two new blue rules:**
+
+```css
+.screen.sending{border-color:var(--cobalt);box-shadow:0 0 0 2px var(--cobalt) inset}
+```
+For any card that has the style name `sending`: paint its border cobalt (the app's blue) and add a thin blue line just inside the edge, so the whole card clearly glows blue while its tab is on the way.
+
+```css
+.screen.sending .screen-you{color:var(--cobalt)}
+```
+For the small caption inside that same card: make its words blue too, so "Sending…" matches the card.
+
+## Part 3: `app/main/handoff.js`
+
+```js
+let direct = null; // the one tab lookup in progress (ACTIVE_TAB has no id): { target, name, done, lookupTimer }
+```
+Only the sticky note changed. `direct` used to mean "our one send in progress, from start to finish". Now it only covers the **short first step: reading your tab**. The helper's answer ("here is the tab") has no label saying who it was for, so we can only ask the helper **one question at a time**, and `direct` remembers who that one question is for.
+
+```js
+if (direct) return resolve({ ok: false, error: 'Still reading your last tab' });
+```
+If you right-click a second person while the helper is still busy reading your tab, you get this message. It is now accurate: the wait it describes is only the quick reading step, not the whole send. The old words, "Still sending the last tab", were misleading.
+
+```js
+if (!d) return; // nobody asked: ignore
+clearTimeout(d.lookupTimer);
+direct = null; // the lookup is over: the next press may start its own
+```
+When the helper answers, the old code kept `direct` filled in until the **whole send finished** (the other laptop pressing Accept, or the timeout). That is why you could only send to one person at a time. Now, as soon as the tab has been read, `direct` is **emptied** straight away. The send continues on its own, waiting in the same waiting list as every other hand-over (the list called `waiting`). The old lines that checked and cleared `lookupTimer = null` as a "already sent" flag are no longer needed because emptying `direct` does that job.
+
+**What this means in real life:** you can right-click Rafi, then Sam, then Alex quickly. Each one reads the tab, then each one sits waiting for that person to press **Accept**. Several sends can now wait for Accept **at the same time**.
+
+## Part 4: `app/main/room.js` (Koushik's fix)
+
+This fix was written by Koushik on the integration branch and **copied here**.
+
+**What went wrong before:** when you make a room, the app does things in order: (1) tell the internet relay "a room now exists", (2) start its own small server on the laptop, and only after both (3) write down "I am the host, here is the room and the seating chart". Between steps 1 and 3 there is a short gap. A person who joined in the **very first moment** after the room was made arrived inside that gap. The host's app had not yet written down that it was the host, so it had no seating chart to put them on. The new person got **lost**: no card appeared for them, and they could neither send nor receive anything.
+
+**How each changed piece fixes it:**
+
+```js
+let pendingCreate = null; // host metadata until the first server confirms creation
+```
+A new labelled box that holds **the host's room details** (number, PIN, laptop addresses) while the room is still being set up. Empty means nothing is being set up.
+
+```js
+if (msg.type === 'ROOM_CREATED' && !room && pendingCreate) {
+  room = makeRoom({ isHost: true, hostId: deviceId, ...pendingCreate });
+  room.screens = [{ deviceId, x: 0, y: 0, w: profile.screenWidth, h: profile.screenHeight }];
+  room.neighbors = computeNeighbors(room.screens);
+}
+```
+This is the heart of the fix. The moment the relay's note "ROOM_CREATED" arrives, and we do not yet have a room, but we have the saved details, we **write down the host's room right then**: make the room, put the host's own screen on the seating chart, and work out who is next to whom. Now when the first joiner's note arrives right after, the room already exists and they can be seated. (Before, this same writing-down happened only at the very end of the set-up, which was too late.)
+
+```js
+pendingCreate = { roomNumber, pin, localIps };
+const createMsg = () => {
+  pendingCreate.roomNumber = roomNumber; // also follow relay number-collision retries
+  return { type: 'CREATE_ROOM', roomNumber, pin, hostLocalIps: localIps, localPort, profile };
+};
+```
+Before asking the relay for a room, save the details in `pendingCreate`. The relay may say "that room number is taken" and the app picks a new number and tries again (up to 5 times). Each time the "create" note is built, the saved number is updated too, so the saved details always match the number that finally worked.
+
+```js
+pendingCreate = null;
+```
+This line appears in three places, all for tidying up:
+- when **both** the relay and the local server fail and the room cannot start (nothing to keep);
+- at the **end of a successful set-up**, replacing the three old lines that used to make the room only then (the comment there says to keep people who arrived meanwhile: the room already exists, so members who joined during the gap are not wiped);
+- inside `leaveRoom`, so leaving a room clears any half-finished set-up details.
+
+**Tested:** before the fix, 5 of 5 forced quick joins (a person joining in that very first moment, made to happen on purpose) failed. After the fix, 8 of 8 passed.
+
+## Status
+
+Built and tested on a Mac with real right-clicks in the real app and a pretend Windows helper (14 checks). It has **not** been run on Windows yet.
