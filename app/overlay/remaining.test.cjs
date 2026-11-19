@@ -31,7 +31,7 @@ test('preview-free direct arrivals enter from each specified edge and settle onc
     const s = setup();
     s.ghosts.receive({ type: 'COMMIT', transferId: edge, direct: true, role: 'receiver', edge, width: 300, height: 200, mode: 'collaborative', title: 'Direct tab', url: 'https://example.com' });
     const c = s.ghosts.cards.get(edge);
-    assert.equal(c.caption.hidden, false); assert.match(c.caption.textContent, /Direct tab/);
+    assert.equal(c.caption.hidden, false); assert.equal(c.parts.title.textContent, 'Direct tab'); assert.equal(c.parts.where.textContent, 'example.com'); assert.equal(c.parts.badge.textContent, 'WEB');
     const start = { ...c.current }; s.tick(260);
     assert.equal(s.settled.length, 1);
     assert.ok(c.current.x >= 0 && c.current.y >= 0);
@@ -50,13 +50,25 @@ test('file card uses safe text, icon and size, follows normal lifecycle without 
   const s = setup();
   s.ghosts.receive({ type: 'COMMIT', kind: 'file', direct: true, transferId: 'file', role: 'receiver', mode: 'collaborative', edge: 'LEFT', filename: '<img onerror=alert(1)>.pdf', size: 2048 });
   const c = s.ghosts.cards.get('file');
-  assert.equal(c.caption.textContent, '\u{1F4C4} <img onerror=alert(1)>.pdf\n2.0 KB');
+  assert.equal(c.parts.title.textContent, '<img onerror=alert(1)>.pdf');
+  assert.equal(c.parts.sub.textContent, '2.0 KB'); assert.equal(c.parts.badge.textContent, 'PDF'); assert.equal(c.parts.status.textContent, 'Saving\u2026');
+  const all = n => [n, ...(n.children || []).flatMap(all)];
+  assert.deepEqual(all(c.caption).map(n => n.className), ['ghost-caption', 'ghost-badge warm', 'ghost-title', 'ghost-sub', 'ghost-progress', 'ghost-track', 'ghost-status']);
   assert.equal(c.image.hidden, true);
   s.tick(260); assert.equal(s.settled.length, 1);
   s.ghosts.receive({ type: 'PLACED', transferId: 'file' }); s.tick(380);
   assert.equal(s.ghosts.cards.size, 0);
   assert.equal(fileSize(0), '0 B'); assert.equal(fileSize(1024 ** 2), '1.0 MB');
   assert.equal(fileSize(-1), 'Size unavailable'); assert.equal(fileSize(Infinity), 'Size unavailable');
+});
+test('document and web cards show filename or site name, sender, never the full URL', () => {
+  const s = setup();
+  s.ghosts.receive({ type: 'COMMIT', transferId: 'doc', direct: true, role: 'receiver', edge: 'RIGHT', kind: 'tab', title: 'notes.txt', url: 'file:///notes.txt', fromName: 'Bravo' });
+  const d = s.ghosts.cards.get('doc').parts;
+  assert.deepEqual([d.where.textContent, d.badge.textContent, d.title.textContent, d.sub.textContent, d.status.textContent], ['Document', 'TXT', 'notes.txt', 'from Bravo', 'Opening\u2026']);
+  s.ghosts.receive({ type: 'COMMIT', transferId: 'web', direct: true, role: 'receiver', edge: 'RIGHT', kind: 'tab', title: 'Example Domain', url: 'https://www.example.com/secret?q=1', fromName: 'Bravo' });
+  const w = s.ghosts.cards.get('web').parts;
+  assert.deepEqual([w.where.textContent, w.badge.textContent, w.title.textContent, w.sub.textContent], ['example.com', 'WEB', 'Example Domain', 'from Bravo']);
 });
 test('direct approval waits for acceptance; focus does not draw or settle', () => {
   const s = setup();

@@ -86,5 +86,5 @@ Privacy: the helper only detects the phrase; audio is never stored or sent. Ctrl
   "Let desktop apps access your microphone".
 - macOS: System Settings -> Privacy & Security -> Microphone -> allow Odyssync (or Electron when run with `npm start`).
 
-Messages the user may see: "Microphone is not available", "Voice needs an internet connection",
+Messages the user may see: "Microphone is not available", "Voice needs an internet connection", "Voice couldn't connect: <reason>",
 "Voice is not set up yet: add the ElevenLabs agent ID".

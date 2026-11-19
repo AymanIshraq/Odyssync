@@ -6,7 +6,7 @@
   const { Conversation } = window.ElevenLabsClient;
 
   const TOOLS = ['list_members', 'set_mode', 'send_current', 'show_send_menu', 'send_items'];
-  const SILENCE_MS = 8000;      // end the chat after 8 s of quiet once the agent has spoken
+  const SILENCE_MS = 6000;      // end the chat after 6 s of quiet once the agent has spoken (ElevenLabs asks "are you still there?" at about 7 s, which would keep it alive)
   const VAD_SPEECH = 0.5;       // voice-activity score that counts as "the user is talking"
 
   let config = { agentId: '' };
@@ -26,6 +26,12 @@
   }
 
   // ---- errors ----
+
+  // The real reason, short enough for a toast.
+  function reasonOf(err) {
+    const text = String((err && (err.message || err.reason)) || err || 'unknown error').replace(/\s+/g, ' ').trim();
+    return text.length > 80 ? text.slice(0, 79) + '…' : text;
+  }
 
   function isMicError(err) {
     const name = err && err.name;
@@ -78,6 +84,8 @@
     try {
       s.conversation = await Conversation.startSession({
         agentId: config.agentId,
+        // Plain WebSocket to wss://api.elevenlabs.io: works on Wi-Fi that blocks WebRTC (the default).
+        connectionType: 'websocket',
         clientTools: clientTools(),
         onModeChange: ({ mode }) => {
           if (s.ended) return;
@@ -96,14 +104,16 @@
           if (s.ended) return;
           if (details && details.reason === 'error') {
             console.log('Voice disconnected:', details.message);
-            api.notice('Voice needs an internet connection');
+            api.notice(navigator.onLine ? "Voice couldn't connect: " + reasonOf(details.message) : 'Voice needs an internet connection');
           }
           finish(s);
         },
       });
     } catch (err) {
       console.log('Voice session failed:', err && err.message);
-      api.notice(isMicError(err) ? 'Microphone is not available' : 'Voice needs an internet connection');
+      api.notice(isMicError(err) ? 'Microphone is not available'
+        : !navigator.onLine ? 'Voice needs an internet connection'
+        : "Voice couldn't connect: " + reasonOf(err));
       return finish(s);
     }
     if (s.endWanted) return endSession();   // start pressed again while connecting

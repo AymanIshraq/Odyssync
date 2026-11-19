@@ -1,6 +1,24 @@
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; pointer-events: none; }
-.ghost { position: absolute; left: 0; top: 0; overflow: hidden; border-radius: 12px; background: #07172f; outline: 1px solid #155cf4; will-change: transform, opacity; }
-.ghost img { width: 100%; height: 100%; object-fit: fill; }
+.ghost { position: absolute; left: 0; top: 0; display: flex; flex-direction: column; box-sizing: border-box; overflow: hidden; border: 1px solid #334d72; border-radius: 14px; background: var(--sm-panel); color: var(--sm-text); box-shadow: var(--sm-shadow); font: 14px/1.4 'Inter', 'Segoe UI', system-ui, sans-serif; container-type: size; will-change: transform, opacity; }
+.ghost img { flex: 1; min-height: 0; width: 100%; object-fit: cover; object-position: top; }
+.ghost-bar { flex: none; display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px; box-sizing: border-box; border-bottom: 1px solid var(--sm-line); }
+.ghost-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; opacity: .7; }
+.ghost-dot.red { background: #ff5f57; } .ghost-dot.amber { background: #febc2e; } .ghost-dot.green { background: #28c840; }
+.ghost-where { min-width: 0; margin-left: 6px; color: var(--sm-muted); font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ghost-caption { flex: 1; min-height: 0; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 100%; max-width: 420px; margin: 0 auto; padding: clamp(12px, 6cqh, 24px); text-align: center; overflow: hidden; }
+.ghost-badge { flex: none; display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 4px; border-radius: 12px; background: var(--sm-badge); color: var(--sm-badge-text); font-size: 12px; font-weight: 700; letter-spacing: .04em; }
+.ghost-badge.warm { background: var(--sm-warm); color: var(--sm-warm-text); }
+.ghost-title { max-width: 100%; font-size: 17px; font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.ghost-sub { max-width: 100%; color: var(--sm-muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ghost-progress { display: flex; flex-direction: column; align-items: center; gap: 6px; width: min(180px, 100%); margin-top: 8px; }
+.ghost-track { position: relative; width: 100%; height: 4px; border-radius: 2px; background: var(--sm-line); overflow: hidden; }
+.ghost-track::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; border-radius: 2px; background: #155cf4; animation: ghost-shimmer 1.2s ease-in-out infinite; }
+.ghost-status { color: var(--sm-muted); font-size: 12px; }
+@keyframes ghost-shimmer { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+@media (prefers-reduced-motion: reduce) { .ghost-track::after { animation: none; left: 30%; } }
+@media (prefers-color-scheme: light) { .ghost { border-color: #c3d0e6; } }
+@container (max-height: 230px) { .ghost-caption { gap: 4px; } .ghost-badge { width: 36px; height: 36px; border-radius: 10px; font-size: 10px; margin-bottom: 0; } .ghost-title { font-size: 15px; -webkit-line-clamp: 1; } .ghost-status { display: none; } .ghost-progress { margin-top: 4px; } }
+@container (max-height: 150px) { .ghost-badge, .ghost-sub { display: none; } }
 [hidden] { display: none !important; }
 .bezel { position: absolute; left: 0; top: 0; z-index: 1; pointer-events: none; border-radius: 7px; background: currentColor; box-shadow: 0 0 14px 5px currentColor; opacity: .8; will-change: transform; }
 .approval { position: absolute; top: 0; left: 0; z-index: 3; box-sizing: border-box; padding: 12px; border: 2px solid #ffb347; border-radius: 12px; background: #07172f; color: #f2f6ff; font: 14px/1.3 'Manrope', system-ui, sans-serif; pointer-events: auto; animation: approval-pulse 1.4s ease-in-out infinite; overflow: auto; }
@@ -15,7 +33,6 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background:
 .approval button:focus-visible { outline: 2px solid #c9fa19; outline-offset: 2px; }
 @keyframes approval-pulse { 50% { box-shadow: 0 0 16px #ffb34780; } }
 @media (prefers-reduced-motion: reduce) { .approval { animation: none; } }
-.ghost-caption { box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; padding: 24px; height: 100%; color: #f2f6ff; font: 16px/1.6 system-ui, sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; overflow: hidden; }
 .drop-strip { position: absolute; z-index: 2; box-sizing: border-box; display: flex; align-items: center; justify-content: center; border: 2px dashed #155cf4; background: #07172fb3; color: #f2f6ff; font: 13px system-ui, sans-serif; text-align: center; pointer-events: auto; }
 /* Voice orb, voice send menu and toast. Colours follow the system theme (dark by default). */
 :root { --sm-panel: #11253e; --sm-text: #f2f6ff; --sm-muted: #a6b5cb; --sm-line: #243855; --sm-row: #7b90b012; --sm-badge: #155cf433; --sm-badge-text: #6d9bff; --sm-warm: #ff761833; --sm-warm-text: #ff7618; --sm-picked: #155cf426; --sm-shadow: 0 30px 80px #0013415c; }

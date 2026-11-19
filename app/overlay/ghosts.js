@@ -34,6 +34,25 @@
   }
   const spring = p => bezier(p, .16, 1, .3, 1);
   const rebound = p => bezier(p, .34, 1.56, .64, 1);
+  // Words shown on the card: site or file type in the title bar, a badge, the name, who sent it and a progress line.
+  function describe(parts, e) {
+    const url = typeof e.url === 'string' ? e.url : '';
+    const isFile = e.kind === 'file', isDoc = !isFile && url.startsWith('file:'), isWeb = !isFile && /^https?:/i.test(url);
+    let host = '';
+    if (isWeb) try { host = new URL(url).hostname.replace(/^www\./i, ''); } catch { host = ''; }
+    let docName = '';
+    if (isDoc) try { docName = decodeURIComponent(url.split('/').pop() || ''); } catch { docName = ''; }
+    const name = isFile ? e.filename || 'Incoming file' : isDoc ? e.filename || e.title || docName || 'Document' : e.title || host || 'Incoming tab';
+    const ext = (isFile || isDoc) && (name.match(/\.([a-z0-9]{1,8})$/i) || [])[1];
+    parts.where.textContent = isFile ? 'File' : isDoc ? 'Document' : host || 'Tab';
+    parts.badge.textContent = ext ? ext.slice(0, 4).toUpperCase() : isFile ? 'FILE' : isWeb ? 'WEB' : isDoc ? 'DOC' : 'TAB';
+    parts.badge.className = isFile ? 'ghost-badge warm' : 'ghost-badge';
+    parts.title.textContent = name;
+    const from = e.fromName ? `from ${e.fromName}` : '';
+    parts.sub.textContent = isFile ? [from, fileSize(e.size)].filter(Boolean).join(' \u00b7 ') : from;
+    parts.sub.hidden = !parts.sub.textContent;
+    parts.status.textContent = isFile ? 'Saving\u2026' : 'Opening\u2026';
+  }
   function createGhosts({ document, viewport, settled, clock = () => performance.now(), pointer = () => null }) {
     const cards = new Map();
     function remove(card) { card.image.onload = null; card.image.onerror = null; card.node.remove(); cards.delete(card.id); }
@@ -42,15 +61,22 @@
       if (!card) {
         const node = document.createElement('div');
         node.className = 'ghost';
+        const make = (className, parent) => { const el = document.createElement('div'); el.className = className; parent.append(el); return el; };
+        const bar = make('ghost-bar', node);
+        for (const dot of ['red', 'amber', 'green']) make(`ghost-dot ${dot}`, bar);
         const image = document.createElement('img');
         image.alt = '';
         image.hidden = true;
         node.hidden = true;
         node.append(image);
-        const caption = document.createElement('div'); caption.className = 'ghost-caption';
-        caption.hidden = true; node.append(caption);
+        const caption = make('ghost-caption', node);
+        caption.hidden = true;
+        const parts = { where: make('ghost-where', bar), badge: make('ghost-badge', caption), title: make('ghost-title', caption), sub: make('ghost-sub', caption) };
+        const progress = make('ghost-progress', caption);
+        make('ghost-track', progress);
+        parts.status = make('ghost-status', progress);
         document.body.append(node);
-        card = { id: event.transferId, node, image, caption, event: {}, current: null };
+        card = { id: event.transferId, node, image, caption, parts, event: {}, current: null };
         cards.set(card.id, card);
       }
       return card;
@@ -78,11 +104,9 @@
         return;
       }
       const view = viewport();
+      describe(card.parts, e);
       if (e.kind === 'file' || (event.type === 'COMMIT' && !e.imageUrl)) {
         card.caption.hidden = false;
-        card.caption.textContent = e.kind === 'file'
-          ? `\u{1F4C4} ${e.filename || 'Incoming file'}\n${fileSize(e.size)}`
-          : `${e.title || 'Incoming tab'}\n${e.url || ''}`;
         if (e.kind === 'file') card.image.hidden = true;
       }
       if (!card.current && event.type === 'COMMIT' && e.role === 'sender') {

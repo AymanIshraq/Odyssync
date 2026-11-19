@@ -76,7 +76,17 @@ function createOverlayWindow() {
   overlayWin.loadFile(path.join(__dirname, '..', 'overlay', 'index.html'));
 }
 
+// Only one Odyssync at a time: a second launch just brings the running one forward
+// (two copies would fight over the helper's port 8089 and the second would have no helper).
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.exit(0);
+} else {
+  app.on('second-instance', () => { if (manager) showControlWindow(); });
+}
+
 app.whenReady().then(() => {
+  if (!gotLock) return;
   const { size, scaleFactor } = screen.getPrimaryDisplay();
   const profile = { displayName: os.hostname(), screenWidth: size.width, screenHeight: size.height, dpiScale: scaleFactor };
   const overlay = room.wireOverlay(ipcMain, () => overlayWin);
